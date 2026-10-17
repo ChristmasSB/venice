@@ -1,0 +1,121 @@
+#![allow(dead_code, unused, non_snake_case)]
+use crate::win::*;
+
+pub struct Mem { pub handle: HANDLE, pub pid: u32, pub base: u64, pub size: u64 }
+
+pub fn cstr(b: &[u8]) -> String {
+    let e = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    String::from_utf8_lossy(&b[..e]).to_string()
+}
+
+pub fn find_pid(name: &str) -> Option<u32> {
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE { return None; }
+        let mut pe: PROCESSENTRY32 = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+        let mut ok = Process32First(snap, &mut pe);
+        let t = name.to_ascii_lowercase();
+        let mut r = None;
+        while ok != 0 {
+            if cstr(&pe.szExeFile).to_ascii_lowercase() == t { r = Some(pe.th32ProcessID); break; }
+            ok = Process32Next(snap, &mut pe);
+        }
+        CloseHandle(snap);
+        r
+    }
+}
+
+pub fn list_rust() -> Vec<String> {
+    let mut v = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE { return v; }
+        let mut pe: PROCESSENTRY32 = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+        let mut ok = Process32First(snap, &mut pe);
+        while ok != 0 {
+            let n = cstr(&pe.szExeFile);
+            if n.to_ascii_lowercase().contains("rust") {
+                v.push(format!("{} [{}]", n, pe.th32ProcessID));
+            }
+            ok = Process32Next(snap, &mut pe);
+        }
+        CloseHandle(snap);
+    }
+    v
+}
+
+pub fn module_base(pid: u32, name: &str) -> Option<(u64, u64)> {
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if snap == INVALID_HANDLE_VALUE { return None; }
+        let mut me: MODULEENTRY32 = std::mem::zeroed();
+        me.dwSize = std::mem::size_of::<MODULEENTRY32>() as u32;
+        let t = name.to_ascii_lowercase();
+        let mut ok = Module32First(snap, &mut me);
+        let mut r = None;
+        while ok != 0 {
+            if cstr(&me.szModule).to_ascii_lowercase() == t {
+                r = Some((me.modBaseAddr as u64, me.modBaseSize as u64));
+                break;
+            }
+            ok = Module32Next(snap, &mut me);
+        }
+        CloseHandle(snap);
+        r
+    }
+}
+
+impl Mem {
+    pub fn attach(exe: &str, module: &str) -> Result<Mem, String> {
+        let pid = find_pid(exe).ok_or_else(|| format!("nema procesa {}", exe))?;
+        let mut h = unsafe { OpenProcess(PROCESS_ALL_ACCESS, 0, pid) };
+        if h.is_null() {
+            h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_LIMITED, 0, pid) };
+        }
+        if h.is_null() {
+            h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED, 0, pid) };
+        }
+        if h.is_null() {
+            return Err(format!("OpenProcess err={}", unsafe { GetLastError() }));
+        }
+        let mut mb = None;
+        for _ in 0..10 {
+            if let Some(x) = module_base(pid, module) { mb = Some(x); break; }
+            unsafe { Sleep(30); }
+        }
+        let (base, size) = mb.ok_or_else(|| format!("{} nije nadjen (pid {})", module, pid))?;
+        Ok(Mem { handle: h, pid, base, size })
+    }
+
+    pub fn read(&self, a: u64, b: &mut [u8]) -> bool {
+        if a == 0 { return false; }
+        let mut n = 0usize;
+        let ok = unsafe { ReadProcessMemory(self.handle, a as *const u8, b.as_mut_ptr(), b.len(), &mut n) };
+        ok != 0 && n == b.len()
+    }
+    pub fn read_u8(&self, a: u64) -> u8 { let mut b = [0u8; 1]; if self.read(a, &mut b) { b[0] } else { 0 } }
+    pub fn read_u32(&self, a: u64) -> u32 { let mut b = [0u8; 4]; if self.read(a, &mut b) { u32::from_le_bytes(b) } else { 0 } }
+    pub fn read_i32(&self, a: u64) -> i32 { self.read_u32(a) as i32 }
+    pub fn read_u64(&self, a: u64) -> u64 { let mut b = [0u8; 8]; if self.read(a, &mut b) { u64::from_le_bytes(b) } else { 0 } }
+    pub fn read_f32(&self, a: u64) -> f32 { f32::from_bits(self.read_u32(a)) }
+    pub fn read_vec3(&self, a: u64) -> [f32; 3] { [self.read_f32(a), self.read_f32(a + 4), self.read_f32(a + 8)] }
+
+    pub fn write_u32(&self, a: u64, v: u32) -> bool {
+        let b = v.to_le_bytes();
+        let mut n = 0usize;
+        unsafe { WriteProcessMemory(self.handle, a as *mut u8, b.as_ptr(), 4, &mut n) != 0 }
+    }
+    pub fn write_f32(&self, a: u64, v: f32) -> bool { self.write_u32(a, v.to_bits()) }
+
+    pub fn read_ustring(&self, a: u64, max: usize) -> String {
+        if a == 0 { return String::new(); }
+        let len = self.read_i32(a + 0x10);
+        if len <= 0 || len > max as i32 { return String::new(); }
+        let mut u = vec![0u16; len as usize];
+        let bytes = unsafe { std::slice::from_raw_parts_mut(u.as_mut_ptr() as *mut u8, len as usize * 2) };
+        if !self.read(a + 0x14, bytes) { return String::new(); }
+        String::from_utf16_lossy(&u)
+    }
+}
