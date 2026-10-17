@@ -1,0 +1,13 @@
+[package]
+name = "venice_rust"
+version = "3.1.0"
+edition = "2021"
+
+[[bin]]
+name = "venice_rust"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+panic = "abort"
+strip = true
