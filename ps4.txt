@@ -1,0 +1,450 @@
+$ErrorActionPreference = 'Stop'
+$root = "$HOME\venice-rust"
+New-Item -ItemType Directory -Force -Path "$root\src" | Out-Null
+
+Set-Content -Path "$root\src\ui.rs" -Encoding Ascii -Value @'
+#![allow(dead_code, unused)]
+use crate::cfg::Cfg;
+use crate::draw::Canvas;
+use crate::game::Game;
+
+pub struct Ui {
+    pub open: bool,
+    pub mx: i32,
+    pub my: i32,
+    pub click: bool,
+    pub edit: Option<String>,
+    pub buf: String,
+    pub color: usize,
+    pub status: Vec<String>,
+    pub hot: i32,
+}
+
+pub const COLORS: [(u8, u8, u8); 6] = [
+    (0, 255, 0), (0, 255, 255), (255, 255, 0),
+    (255, 0, 255), (255, 60, 60), (255, 255, 255),
+];
+
+impl Ui {
+    pub fn new() -> Ui {
+        Ui { open: true, mx: 0, my: 0, click: false, edit: None, buf: String::new(), color: 0, status: Vec::new(), hot: -1 }
+    }
+
+    fn row(&mut self, c: &mut Canvas, cfg: &mut Cfg, y: &mut i32, label: &str, key: &str, kind: u8, step: u64) {
+        let x = 20;
+        let w = 300;
+        let h = 18;
+        let hot = self.mx >= x && self.mx < x + w && self.my >= *y && self.my < *y + h;
+        if hot { self.hot = *y; }
+        c.rect(x, *y, w, h, 30, 30, 38, 230);
+        let editing = self.edit.as_deref() == Some(key);
+        let mut val = cfg.s(key, "0");
+        if editing { val = self.buf.clone(); }
+        let vnum = crate::cfg::num(&val);
+
+        c.text(x + 6, *y + 5, label, 210, 210, 220, 255, 1);
+
+        if kind == 0 {
+            let on = cfg.b(key, false);
+            let (r, g, b) = if on { (0, 220, 0) } else { (160, 60, 60) };
+            c.text(x + w - 60, *y + 5, if on { "ON" } else { "OFF" }, r, g, b, 255, 1);
+            if hot && self.click {
+                cfg.set(key, if on { "0" } else { "1" });
+            }
+        } else if kind == 1 {
+            c.text(x + w - 130, *y + 5, "-", 255, 255, 255, 255, 1);
+            c.text(x + w - 78, *y + 5, &format!("{:X}", vnum), 255, 220, 80, 255, 1);
+            c.text(x + w - 24, *y + 5, "+", 255, 255, 255, 255, 1);
+            if hot && self.click {
+                if self.mx > x + w - 60 {
+                    cfg.set(key, &format!("{:X}", vnum.saturating_add(step)));
+                } else {
+                    cfg.set(key, &format!("{:X}", vnum.saturating_sub(step)));
+                }
+            }
+        } else {
+            let shown = if editing { format!("{}_", self.buf) } else { format!("{:X}", vnum) };
+            c.text(x + w - 110, *y + 5, &shown, 255, 220, 80, 255, 1);
+            if hot && self.click {
+                if editing {
+                    self.edit = None;
+                } else {
+                    self.edit = Some(key.to_string());
+                    self.buf = format!("{:X}", vnum);
+                }
+            }
+        }
+        *y += h + 2;
+    }
+
+    pub fn draw(&mut self, c: &mut Canvas, cfg: &mut Cfg, g: &Game) {
+        if !self.open { return; }
+        self.hot = -1;
+        let x = 10;
+        let mut y = 10;
+        let w = 320;
+        let rows = 30;
+        c.rect(x, y, w, rows * 20 + 60, 12, 12, 18, 235);
+        c.frame(x, y, w, rows * 20 + 60, 0, 180, 255, 255);
+        c.text(x + 8, y + 6, "VENICE RUST v3.1", 0, 220, 255, 255, 1);
+        y += 22;
+
+        self.row(c, cfg, &mut y, "ESP", "esp_enabled", 0, 1);
+        self.row(c, cfg, &mut y, "BOX", "esp_box", 0, 1);
+        self.row(c, cfg, &mut y, "IME", "esp_name", 0, 1);
+        self.row(c, cfg, &mut y, "HP", "esp_health", 0, 1);
+        self.row(c, cfg, &mut y, "DIST", "esp_distance", 0, 1);
+        self.row(c, cfg, &mut y, "MAX DIST", "esp_max_distance", 1, 25);
+        self.row(c, cfg, &mut y, "SCALE", "esp_text_scale", 1, 1);
+        self.row(c, cfg, &mut y, "NORECOIL", "norecoil", 0, 1);
+        self.row(c, cfg, &mut y, "NOSPREAD", "nospread", 0, 1);
+
+        let cl = COLORS[self.color];
+        let hotc = self.mx >= x + 8 && self.mx < x + 100 && self.my >= y && self.my < y + 18;
+        c.rect(x + 6, y, 300, 18, 30, 30, 38, 230);
+        c.text(x + 10, y + 5, "BOJA", 210, 210, 220, 255, 1);
+        c.rect(x + 250, y + 4, 48, 10, cl.0, cl.1, cl.2, 255);
+        if hotc && self.click { self.color = (self.color + 1) % COLORS.len(); }
+        y += 20;
+
+        let _ = g;
+        c.text(x + 8, y + 4, "--- OFSETI (klik = edit hex) ---", 120, 180, 255, 255, 1);
+        y += 20;
+
+        let keys = [
+            "localplayer_static", "static_fields", "localplayer_entity", "hv_in_wrapper",
+            "bn_static", "bn_list_off", "list_items_off", "list_count_off", "array_data",
+            "player_name", "player_uid", "player_health", "player_inventory",
+            "camera_static", "camera_instance", "w2c_off", "recoil_props",
+        ];
+        for k in keys.iter() {
+            self.row(c, cfg, &mut y, k, k, 2, 1);
+        }
+
+        y += 4;
+        c.text(x + 8, y, "STATUS:", 255, 180, 0, 255, 1);
+        y += 14;
+        for s in self.status.iter().take(10) {
+            c.text(x + 8, y, s, 200, 200, 200, 255, 1);
+            y += 12;
+        }
+        y += 2;
+        c.text(x + 8, y, "F1 menu  F2 esp  F3 recoil  F4 spread  F5 reload  END exit", 140, 140, 160, 255, 1);
+    }
+
+    pub fn key_char(&mut self, vk: i32, cfg: &mut Cfg) {
+        if self.edit.is_none() { return; }
+        let ch = match vk {
+            0x30..=0x39 => Some((vk as u8) as char),
+            0x41..=0x46 => Some((vk as u8) as char),
+            0x60..=0x69 => Some((b'0' + (vk - 0x60) as u8) as char),
+            _ => None,
+        };
+        if let Some(c) = ch {
+            if self.buf.len() < 12 { self.buf.push(c); }
+        }
+        if vk == crate::win::VK_BACK { self.buf.pop(); }
+        if vk == crate::win::VK_RETURN {
+            if let Some(k) = self.edit.clone() {
+                cfg.set(&k, &self.buf.clone());
+            }
+            self.edit = None;
+        }
+        if vk == crate::win::VK_ESCAPE { self.edit = None; }
+    }
+}
+'@
+
+Set-Content -Path "$root\src\main.rs" -Encoding Ascii -Value @'
+#![allow(dead_code, unused, non_snake_case)]
+mod win; mod mem; mod cfg; mod draw; mod game; mod ui;
+
+use win::*;
+use std::ffi::c_void;
+
+fn vk_of(name: &str) -> i32 {
+    let n = name.trim().to_ascii_uppercase();
+    if n.len() >= 2 && n.starts_with('F') {
+        if let Ok(k) = n[1..].parse::<i32>() {
+            if k >= 1 && k <= 12 { return 0x6F + k; }
+        }
+    }
+    match n.as_str() {
+        "END" => 0x23, "INSERT" | "INS" => 0x2D, "DELETE" | "DEL" => 0x2E,
+        "HOME" => 0x24, "PGUP" => 0x21, "PGDN" => 0x22,
+        "ESC" | "ESCAPE" => 0x1B, "SPACE" => 0x20, "TAB" => 0x09,
+        "UP" => 0x26, "DOWN" => 0x28, "LEFT" => 0x25, "RIGHT" => 0x27,
+        s if s.len() == 1 => s.as_bytes()[0] as i32,
+        _ => 0x70,
+    }
+}
+
+struct Keys { prev: [bool; 256] }
+impl Keys {
+    fn new() -> Keys { Keys { prev: [false; 256] } }
+    fn pressed(&mut self, vk: i32) -> bool {
+        if vk < 0 || vk > 255 { return false; }
+        let d = (unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000) != 0;
+        let was = self.prev[vk as usize];
+        self.prev[vk as usize] = d;
+        d && !was
+    }
+}
+
+unsafe extern "system" fn wndproc(h: HWND, m: UINT, w: WPARAM, l: LPARAM) -> LRESULT {
+    match m {
+        0x0002 => { PostQuitMessage(0); 0 }
+        0x0014 => 1,
+        _ => DefWindowProcA(h, m, w, l),
+    }
+}
+
+fn find_ini() -> String {
+    if let Ok(p) = std::env::current_exe() {
+        if let Some(d) = p.parent() {
+            let f = d.join("rust.ini");
+            if f.exists() { return f.to_string_lossy().to_string(); }
+        }
+    }
+    "rust.ini".to_string()
+}
+
+fn main() {
+    let ini = find_ini();
+    let mut cfg = cfg::Cfg::load(&ini);
+
+    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    if sw < 100 || sh < 100 { return; }
+
+    let (hwnd, mem_dc, screen_dc, bits);
+    unsafe {
+        let inst = GetModuleHandleA(std::ptr::null());
+        let cls = b"VeniceRustOverlay\0";
+        let mut wc: WNDCLASSA = std::mem::zeroed();
+        wc.lpfnWndProc = Some(wndproc);
+        wc.hInstance = inst;
+        wc.lpszClassName = cls.as_ptr();
+        RegisterClassA(&wc);
+        hwnd = CreateWindowExA(
+            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
+            cls.as_ptr(), b"VENICE RUST\0".as_ptr(), WS_POPUP,
+            0, 0, sw, sh, std::ptr::null_mut(), std::ptr::null_mut(), inst, std::ptr::null_mut());
+        if hwnd.is_null() { return; }
+        ShowWindow(hwnd, SW_SHOW);
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, sw, sh, SWP_NOACTIVATE);
+
+        screen_dc = GetDC(std::ptr::null_mut());
+        mem_dc = CreateCompatibleDC(screen_dc);
+        let mut bi: BITMAPINFO = std::mem::zeroed();
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = sw;
+        bi.bmiHeader.biHeight = -sh;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        let mut b: *mut c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(mem_dc, &bi, DIB_RGB_COLORS, &mut b, std::ptr::null_mut(), 0);
+        SelectObject(mem_dc, dib);
+        bits = b as *mut u32;
+    }
+
+    let mut canvas = draw::Canvas::new(sw, sh);
+    let mut ui = ui::Ui::new();
+    let mut keys = Keys::new();
+    let mut memr: Option<mem::Mem> = None;
+    let mut game: Option<game::Game> = None;
+    let mut status: Vec<String> = Vec::new();
+    let mut last_attach = std::time::Instant::now();
+
+    let k_menu = vk_of(&cfg.s("key_menu", "F1"));
+    let k_esp = vk_of(&cfg.s("key_esp", "F2"));
+    let k_recoil = vk_of(&cfg.s("key_recoil", "F3"));
+    let k_spread = vk_of(&cfg.s("key_spread", "F4"));
+    let k_reload = vk_of(&cfg.s("key_reload", "F5"));
+    let k_exit = vk_of(&cfg.s("key_exit", "END"));
+
+    loop {
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        while unsafe { PeekMessageA(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            unsafe { TranslateMessage(&msg); DispatchMessageA(&msg); }
+        }
+
+        if keys.pressed(k_exit) { break; }
+        if keys.pressed(k_menu) { ui.open = !ui.open; }
+        if keys.pressed(k_esp) { let v = !cfg.b("esp_enabled", true); cfg.set("esp_enabled", if v { "1" } else { "0" }); }
+        if keys.pressed(k_recoil) { let v = !cfg.b("norecoil", true); cfg.set("norecoil", if v { "1" } else { "0" }); }
+        if keys.pressed(k_spread) { let v = !cfg.b("nospread", false); cfg.set("nospread", if v { "1" } else { "0" }); }
+        if keys.pressed(k_reload) { cfg = cfg::Cfg::load(&ini); status.push("ini reload".into()); }
+
+        for vk in 0x08..0x60 { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
+        for vk in 0x60..0x6A { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
+
+        let mut pt = POINT::default();
+        unsafe { GetCursorPos(&mut pt) };
+        ui.mx = pt.x;
+        ui.my = pt.y;
+        let lbtn = (unsafe { GetAsyncKeyState(VK_LBUTTON) } as u16 & 0x8000) != 0;
+        let prev_click = ui.click;
+        ui.click = lbtn && !prev_click;
+        let was_click = ui.click;
+
+        if memr.is_none() && last_attach.elapsed().as_millis() > 1000 {
+            last_attach = std::time::Instant::now();
+            match mem::Mem::attach(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
+                Ok(m) => {
+                    status.clear();
+                    status.push(format!("OK pid={} base={:X}", m.pid, m.base));
+                    game = Some(game::Game::new(cfg::Cfg::load(&ini), m.base, (sw, sh)));
+                    memr = Some(m);
+                }
+                Err(e) => {
+                    status.clear();
+                    status.push(e);
+                    for r in mem::list_rust().iter().take(6) { status.push(r.clone()); }
+                }
+            }
+        }
+
+        if let (Some(m), Some(g)) = (memr.as_ref(), game.as_mut()) {
+            g.cfg = cfg::Cfg::load(&ini);
+            g.refresh(m);
+            if cfg.b("norecoil", true) { g.norecoil(m); }
+            if cfg.b("nospread", false) { g.nospread(m); }
+        }
+
+        canvas.clear();
+
+        if let Some(g) = game.as_ref() {
+            if cfg.b("esp_enabled", true) {
+                let sc = cfg.u("esp_text_scale", 1).max(1) as i32;
+                let maxd = cfg.u("esp_max_distance", 300) as f32;
+                let col = ui::COLORS[ui.color];
+                for p in g.players.iter() {
+                    if p.dist > maxd || p.dist < 0.1 { continue; }
+                    let (sx, sy) = match p.screen { Some(s) => s, None => continue };
+                    let (hx, hy) = match p.head { Some(s) => s, None => continue };
+                    let hgt = (sy - hy).abs().max(12);
+                    let wid = hgt / 2;
+                    let bx = sx - wid / 2;
+                    let by = hy.min(sy);
+                    if cfg.b("esp_box", true) {
+                        canvas.frame(bx, by, wid, hgt, col.0, col.1, col.2, 230);
+                        canvas.frame(bx - 1, by - 1, wid + 2, hgt + 2, 0, 0, 0, 140);
+                    }
+                    let mut ty = by - 10;
+                    if cfg.b("esp_name", true) {
+                        let nm = if p.name.is_empty() { "?" } else { p.name.as_str() };
+                        canvas.text(sx - canvas.tw(nm, sc) / 2, ty, nm, 255, 255, 255, 255, sc);
+                        ty -= canvas.th(sc) + 2;
+                    }
+                    if cfg.b("esp_distance", true) {
+                        let ds = format!("{}m", p.dist as i32);
+                        canvas.text(sx - canvas.tw(&ds, sc) / 2, ty, &ds, 255, 255, 0, 255, sc);
+                    }
+                    if cfg.b("esp_health", true) && p.hp > 0.0 {
+                        let hs = format!("{}", p.hp as i32);
+                        canvas.text(bx + wid + 3, by, &hs, 0, 255, 0, 255, sc);
+                        let hb = (p.hp.clamp(0.0, 100.0) / 100.0 * hgt as f32) as i32;
+                        canvas.rect(bx - 6, by, 3, hgt, 60, 0, 0, 200);
+                        canvas.rect(bx - 6, by + (hgt - hb), 3, hb, 0, 220, 0, 220);
+                    }
+                }
+            }
+        }
+
+        status.truncate(10);
+        ui.status = status.clone();
+        ui.draw(&mut canvas, &mut cfg, game.as_ref().unwrap_or(&game::Game::new(cfg::Cfg::load(&ini), 0, (sw, sh))));
+        let _ = was_click;
+
+        unsafe {
+            let dst = std::slice::from_raw_parts_mut(bits, (sw * sh) as usize);
+            dst.copy_from_slice(&canvas.px);
+            let p0 = POINT { x: 0, y: 0 };
+            let sz = SIZE { cx: sw, cy: sh };
+            let bf = BLENDFUNCTION { BlendOp: AC_SRC_OVER, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA };
+            UpdateLayeredWindow(hwnd, screen_dc, &p0, &sz, mem_dc, &p0, 0, &bf, ULW_ALPHA);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+'@
+
+$ini = @'
+; VENICE RUST v3.1 - rust.ini
+; F1 menu, F2 esp, F3 norecoil, F4 nospread, F5 reload, END exit
+; sve vrijednosti smiju biti hex (0x... ili golo)
+
+[proc]
+exe=RustClient.exe
+module=GameAssembly.dll
+
+[keys]
+key_menu=F1
+key_esp=F2
+key_recoil=F3
+key_spread=F4
+key_reload=F5
+key_exit=END
+
+[esp]
+esp_enabled=1
+esp_box=1
+esp_name=1
+esp_health=1
+esp_distance=1
+esp_max_distance=300
+esp_text_scale=1
+
+[handle]
+handle_mode=u64
+
+[offsets]
+localplayer_static=0x11645DB8
+static_fields=0xB8
+localplayer_entity=0x40
+hv_in_wrapper=0x0
+bn_static=0x115F0A18
+bn_list_off=0x20
+list_items_off=0x10
+list_count_off=0x18
+array_data=0x20
+player_name=0x6F0
+player_uid=0x718
+player_health=0x2B4
+player_inventory=0x510
+pos_chain=0x348,0x10,0x38
+head_h=1.65
+camera_static=0x0
+camera_instance=0x30
+w2c_off=0x2E0
+recoil_props=0x3A8
+item_heldentity=0x88
+itemcontainer_itemlist=0x60
+recoil_fields=0x18,0x1C,0x20,0x24
+spread_fields=0x30,0x34,0x38,0x3C
+norecoil=1
+nospread=0
+'@
+Set-Content -Path "$root\rust.ini" -Encoding Ascii -Value $ini
+
+Write-Host "[+] p4 OK - ui.rs + main.rs + rust.ini"
+Write-Host "[*] BUILD..."
+
+$t = "x86_64-pc-windows-gnu"
+rustup target add $t 2>$null
+Set-Location $root
+$env:RUSTFLAGS = "-C target-feature=+crt-static"
+cargo build --release --target $t
+
+if ($LASTEXITCODE -eq 0) {
+    $dist = "$root\VENICE-RUST-USB"
+    New-Item -ItemType Directory -Force -Path $dist | Out-Null
+    Copy-Item "$root\target\$t\release\venice_rust.exe" $dist -Force
+    Copy-Item "$root\rust.ini" $dist -Force
+    Write-Host "[+] GOTOVO -> $dist"
+} else {
+    Write-Host "[!] build fail"
+}
+Write-Host "# === END P4 ==="
