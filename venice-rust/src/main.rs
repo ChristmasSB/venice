@@ -81,6 +81,7 @@ fn portable_relocate() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut c = Command::new(&tgt);
     c.args(&args);
+    if let Ok(ld) = std::env::var("VENICE_LOG_DIR") { c.env("VENICE_LOG_DIR", ld); }
     let _ = c.creation_flags(CREATE_NEW_CONSOLE);
     match c.spawn() { Ok(_) => true, Err(_) => false }
 }
@@ -126,6 +127,41 @@ fn main() {
 
     let (ini0, mirror0) = ini_paths();
     let cfg0 = read_cfg(&ini0, &mirror0);
+
+    let _orig_dir = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut _cands: Vec<PathBuf> = Vec::new();
+    if let Ok(v) = std::env::var("VENICE_LOG_DIR") { _cands.push(PathBuf::from(v)); }
+    let _ini_log = cfg0.s("log_dir", "");
+    if !_ini_log.trim().is_empty() {
+        let p = PathBuf::from(_ini_log.trim());
+        _cands.push(if p.is_absolute() { p } else { _orig_dir.join(p) });
+    }
+    _cands.push(_orig_dir.join("venice-logs"));
+    _cands.push(_orig_dir.clone());
+    if let Ok(t) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) {
+        _cands.push(PathBuf::from(&t).join("venice_rust"));
+        _cands.push(PathBuf::from(&t).join("venice_rust").join("venice-logs"));
+    }
+    if let Ok(l) = std::env::var("LOCALAPPDATA") {
+        _cands.push(PathBuf::from(&l).join("venice_rust").join("logs"));
+    }
+    if let Ok(u) = std::env::var("USERPROFILE") {
+        _cands.push(PathBuf::from(&u).join("venice-logs"));
+    }
+    for _c in _cands.iter() { mem::add_log_dir(_c.clone()); }
+    std::env::set_var("VENICE_LOG_DIR", _orig_dir.join("venice-logs"));
+
+    let _all: Vec<String> = mem::log_dirs().iter().map(|d| d.display().to_string()).collect();
+    mem::write_log("WHERE_LOGS_ARE.txt", &format!(
+        "t={}\nexe_dir={}\nadmin={}\n--- log folderi ---\n{}\n",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        _orig_dir.display(), mem::is_admin(), _all.join("\n")));
+    mem::write_log("last_run.txt", &format!("start t={} exe_dir={}\n",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        _orig_dir.display()));
 
     if cfg0.b("portable", true) && !inplace { if portable_relocate() { return; } }
     if !mem::is_admin() && !noadmin { if mem::relaunch_elevated() { return; } }
@@ -181,6 +217,8 @@ fn main() {
     let mut status: Vec<String> = Vec::new();
     let mut last_attach = std::time::Instant::now();
     let mut fps_t = std::time::Instant::now();
+    let mut diag_t = std::time::Instant::now();
+    let mut hb_t = std::time::Instant::now();
     let mut frames = 0u32;
     let mut fps = 0f32;
     let dummy = game::Game::new(cfg::Cfg::load("__none__"), 0, (sw, sh));
@@ -205,6 +243,16 @@ fn main() {
             fps = frames as f32 * 1000.0 / fps_t.elapsed().as_millis() as f32;
             frames = 0;
             fps_t = std::time::Instant::now();
+        }
+
+        if hb_t.elapsed().as_millis() > 2000 {
+            hb_t = std::time::Instant::now();
+            let h = format!(
+                "t={} frames={} fps={:.0} attached={} busy={} game={} memr={} status={:?}\n",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|x| x.as_secs()).unwrap_or(0),
+                frames, fps, memr.is_some(), busy.load(Ordering::Relaxed),
+                game.is_some(), memr.as_ref().map(|m| m.pid).unwrap_or(0), status);
+            mem::write_log("heartbeat.txt", &h);
         }
 
         let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -284,6 +332,18 @@ fn main() {
             g.refresh(m);
             if cfg.b("norecoil", true) { g.norecoil(m); }
             if cfg.b("nospread", false) { g.nospread(m); }
+            if diag_t.elapsed().as_millis() > 2000 {
+                diag_t = std::time::Instant::now();
+                let mut d = String::new();
+                d.push_str(&format!("t={} base={:X} local={:X} view_ok={} players={} cam={}\n",
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|x| x.as_secs()).unwrap_or(0),
+                    g.base, g.local, g.view_ok as u8, g.players.len(), g.cam_src));
+                for p in g.players.iter().take(8) {
+                    d.push_str(&format!("  {:016X} hp={:.1} d={:.1} pos=({:.1},{:.1},{:.1}) scr={:?} head={:?} name={}\n",
+                        p.ptr, p.hp, p.dist, p.pos[0], p.pos[1], p.pos[2], p.screen, p.head, p.name));
+                }
+                mem::write_log("esp_debug.txt", &d);
+            }
         }
 
         if ui.want_scan {

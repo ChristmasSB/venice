@@ -36,7 +36,27 @@ pub fn exe_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-pub fn write_log(name: &str, s: &str) { let _ = std::fs::write(exe_dir().join(name), s); }
+pub static LOG_DIRS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+pub fn add_log_dir(p: std::path::PathBuf) {
+    if p.as_os_str().is_empty() { return; }
+    let _ = std::fs::create_dir_all(&p);
+    if let Ok(mut v) = LOG_DIRS.lock() { if !v.contains(&p) { v.push(p); } }
+}
+
+pub fn log_dirs() -> Vec<std::path::PathBuf> {
+    match LOG_DIRS.lock() {
+        Ok(v) if !v.is_empty() => v.clone(),
+        _ => vec![exe_dir()],
+    }
+}
+
+pub fn write_log(name: &str, s: &str) {
+    for d in log_dirs() {
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(d.join(name), s);
+    }
+}
 
 fn stamp() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -517,6 +537,29 @@ pub fn probe(pid: u32) {
     write_log("probe.txt", &s);
 }
 
+pub fn full_dump(h: HANDLE, pid: u32) {
+    let mut s = String::new();
+    s.push_str(&format!("=== venice full dump pid={} t={} ===\n", pid, stamp()));
+    s.push_str(&format!("admin={} bit={} selfIL={}\n", is_admin(),
+                        std::mem::size_of::<usize>() * 8, il_name(il_of_pid(std::process::id()))));
+    let th = mods_th32(pid);
+    s.push_str(&format!("--- toolhelp modules ({}) ---\n", th.len()));
+    for (n, b) in th.iter() { s.push_str(&format!("{:016X} {}\n", b, n)); }
+    let ps = mods_psapi(h);
+    s.push_str(&format!("--- psapi modules ({}) ---\n", ps.len()));
+    for (n, b) in ps.iter() { s.push_str(&format!("{:016X} {}\n", b, n)); }
+    let pb = mods_peb(h);
+    s.push_str(&format!("--- peb modules ({}) ---\n", pb.len()));
+    for (n, b) in pb.iter() { s.push_str(&format!("{:016X} {}\n", b, n)); }
+    write_log("mods.txt", &s);
+    dump_peb(h);
+    let mut bl = String::new();
+    bases_scan(h, &mut bl);
+    write_log("bases.txt", &bl);
+    probe(pid);
+    write_log("dump_done.txt", &format!("ok pid={} t={}\n", pid, stamp()));
+}
+
 pub fn attach5(exe: &str, modules: &str, force_base: u64) -> Result<Mem, String> {
     let cands: Vec<String> = modules.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     if cands.is_empty() { return Err("module= prazan u ini".to_string()); }
@@ -556,6 +599,8 @@ pub fn attach5(exe: &str, modules: &str, force_base: u64) -> Result<Mem, String>
                 } else { "?".to_string() };
                 diag.push_str(&format!("pid{}[{}]({}) ", pid, rights, imgs));
                 log.push_str(&format!("pid{} rights={} writable={} img={}\n", pid, rights, writable, imgs));
+                write_log("attach_log.txt", &log);
+                full_dump(h, *pid);
             }
 
             if force_base != 0 && mz(h, force_base) {

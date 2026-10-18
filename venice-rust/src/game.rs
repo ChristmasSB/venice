@@ -262,35 +262,64 @@ impl Game {
     fn held_items(&self, mem: &Mem) -> Vec<u64> {
         let mut v = Vec::new();
         if self.local == 0 { return v; }
+
+        // 1) direktno: BasePlayer.heldEntity (najbrze i najtacnije)
+        let ho = self.cfg.u("player_held", 0x5B8);
+        if ho != 0 {
+            let h = mem.read_u64(self.local + ho);
+            if h > 0x10000 && h < 0x0000_7FFF_FFFF_FFFF { v.push(h); }
+        }
+
+        // 2) rezervno: preko inventara (main/belt/wear)
         let inv = mem.read_u64(self.local + self.cfg.u("player_inventory", 0x510));
-        if inv == 0 { return v; }
-        for b in 0..3u64 {
-            let cont = mem.read_u64(inv + 0x20 + b * 8);
-            if cont == 0 { continue; }
-            let list = mem.read_u64(cont + self.cfg.u("itemcontainer_itemlist", 0x60));
-            if list == 0 { continue; }
-            let items = mem.read_u64(list + 0x10);
-            let n = mem.read_i32(list + 0x18);
-            if items == 0 || n <= 0 || n > 128 { continue; }
-            let data = items + 0x20;
-            for i in 0..n {
-                let it = mem.read_u64(data + 8 * i as u64);
-                if it == 0 { continue; }
-                let h = mem.read_u64(it + self.cfg.u("item_heldentity", 0x88));
-                if h != 0 { v.push(h); }
+        if inv != 0 {
+            for b in 0..3u64 {
+                let cont = mem.read_u64(inv + 0x20 + b * 8);
+                if cont == 0 { continue; }
+                let list = mem.read_u64(cont + self.cfg.u("itemcontainer_itemlist", 0x60));
+                if list == 0 { continue; }
+                let items = mem.read_u64(list + 0x10);
+                let n = mem.read_i32(list + 0x18);
+                if items == 0 || n <= 0 || n > 128 { continue; }
+                let data = items + 0x20;
+                for i in 0..n {
+                    let it = mem.read_u64(data + 8 * i as u64);
+                    if it == 0 { continue; }
+                    let h = mem.read_u64(it + self.cfg.u("item_heldentity", 0x88));
+                    if h > 0x10000 { v.push(h); }
+                }
             }
         }
+
+        v.sort_unstable();
+        v.dedup();
         v
     }
 
+    fn recoil_props_of(&self, mem: &Mem, h: u64) -> u64 {
+        let mut rp = mem.read_u64(h + self.cfg.u("recoil_props", 0x3A8));
+        if rp > 0x10000 && rp < 0x0000_7FFF_FFFF_FFFF { return rp; }
+        let list = self.cfg.s("recoil_props_list", "0x3A8,0x3B0,0x3A0,0x398,0x3B8");
+        for st in list.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
+            let o = cfg::num(st);
+            if o == 0 { continue; }
+            let c = mem.read_u64(h + o);
+            if c > 0x10000 && c < 0x0000_7FFF_FFFF_FFFF { return c; }
+        }
+        0
+    }
+
     pub fn norecoil(&self, mem: &Mem) -> bool {
-        let fields = self.cfg.s("recoil_fields", "0x18,0x1C,0x20,0x24");
+        let fields = self.cfg.s("recoil_fields", "0x10,0x14,0x18,0x1C");
         let mut any = false;
         for h in self.held_items(mem) {
-            let rp = mem.read_u64(h + self.cfg.u("recoil_props", 0x3A8));
+            let rp = self.recoil_props_of(mem, h);
             if rp < 0x10000 { continue; }
             for f in fields.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
-                mem.write_f32_cached(rp + cfg::num(f), 0.0);
+                mem.write_f32(rp + cfg::num(f), 0.0);
+            }
+            if self.cfg.b("aim_sway", true) {
+                for f in ["0x2C", "0x30"] { mem.write_f32(rp + cfg::num(f), 0.0); }
             }
             any = true;
         }
@@ -301,10 +330,10 @@ impl Game {
         let fields = self.cfg.s("spread_fields", "0x30,0x34,0x38,0x3C");
         let mut any = false;
         for h in self.held_items(mem) {
-            let rp = mem.read_u64(h + self.cfg.u("recoil_props", 0x3A8));
+            let rp = self.recoil_props_of(mem, h);
             if rp < 0x10000 { continue; }
             for f in fields.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
-                mem.write_f32_cached(rp + cfg::num(f), 0.0);
+                mem.write_f32(rp + cfg::num(f), 0.0);
             }
             any = true;
         }
