@@ -1,0 +1,1 @@
+start t=1792288177 logdir=C:\Users\petar\venice-rust\VENICE-RUST-USB\venice-logs
