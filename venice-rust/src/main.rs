@@ -4,15 +4,18 @@ mod win; mod mem; mod cfg; mod draw; mod game; mod ui;
 use win::*;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::os::windows::process::CommandExt;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 const DEFAULT_INI: &str = include_str!("../rust.ini");
 
 fn vk_of(name: &str) -> i32 {
     let n = name.trim().to_ascii_uppercase();
     if n.len() >= 2 && n.starts_with('F') {
-        if let Ok(k) = n[1..].parse::<i32>() {
-            if k >= 1 && k <= 12 { return 0x6F + k; }
-        }
+        if let Ok(k) = n[1..].parse::<i32>() { if k >= 1 && k <= 12 { return 0x6F + k; } }
     }
     match n.as_str() {
         "END" => 0x23, "INSERT" | "INS" => 0x2D, "DELETE" | "DEL" => 0x2E,
@@ -57,8 +60,30 @@ fn cmdline() -> String {
         String::from_utf8_lossy(&v).to_ascii_lowercase()
     }
 }
-
 fn has_arg(a: &str) -> bool { cmdline().contains(&a.to_ascii_lowercase()) }
+
+fn temp_dir() -> PathBuf {
+    std::env::var("TEMP").or_else(|_| std::env::var("TMP"))
+        .map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(".")).join("venice_rust")
+}
+
+fn portable_relocate() -> bool {
+    let cur = match std::env::current_exe() { Ok(p) => p, Err(_) => return false };
+    let dir = temp_dir();
+    let tgt = dir.join("venice_rust.exe");
+    if cur.to_string_lossy().to_ascii_lowercase() == tgt.to_string_lossy().to_ascii_lowercase() { return false; }
+    if std::fs::create_dir_all(&dir).is_err() { return false; }
+    if std::fs::copy(&cur, &tgt).is_err() { return false; }
+    if let Some(d) = cur.parent() {
+        let s = d.join("rust.ini");
+        if s.exists() { let _ = std::fs::copy(&s, dir.join("rust.ini")); }
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut c = Command::new(&tgt);
+    c.args(&args);
+    let _ = c.creation_flags(CREATE_NEW_CONSOLE);
+    match c.spawn() { Ok(_) => true, Err(_) => false }
+}
 
 fn ini_paths() -> (PathBuf, PathBuf) {
     let primary = std::env::current_exe().ok()
@@ -97,10 +122,13 @@ fn save_cfg(c: &cfg::Cfg, primary: &Path, mirror: &Path) {
 fn main() {
     let cleanup = has_arg("--cleanup");
     let noadmin = has_arg("--noadmin");
+    let inplace = has_arg("--inplace");
 
-    if !mem::is_admin() && !noadmin {
-        if mem::relaunch_elevated() { return; }
-    }
+    let (ini0, mirror0) = ini_paths();
+    let cfg0 = read_cfg(&ini0, &mirror0);
+
+    if cfg0.b("portable", true) && !inplace { if portable_relocate() { return; } }
+    if !mem::is_admin() && !noadmin { if mem::relaunch_elevated() { return; } }
     let _dbg = mem::enable_debug_priv();
 
     let (ini, mirror) = ini_paths();
@@ -156,12 +184,18 @@ fn main() {
     let mut frames = 0u32;
     let mut fps = 0f32;
     let dummy = game::Game::new(cfg::Cfg::load("__none__"), 0, (sw, sh));
+    let slot: Arc<Mutex<Option<Result<mem::Mem, String>>>> = Arc::new(Mutex::new(None));
+    let busy = Arc::new(AtomicBool::new(false));
+
+    let self_il = mem::il_of_pid(std::process::id());
+    status.push(format!("admin={} IL={} bit={}", mem::is_admin(), mem::il_name(self_il), std::mem::size_of::<usize>() * 8));
 
     let k_menu = vk_of(&cfg.s("key_menu", "F1"));
     let k_esp = vk_of(&cfg.s("key_esp", "F2"));
     let k_recoil = vk_of(&cfg.s("key_recoil", "F3"));
     let k_spread = vk_of(&cfg.s("key_spread", "F4"));
     let k_reload = vk_of(&cfg.s("key_reload", "F5"));
+    let k_scan = vk_of(&cfg.s("key_scan", "F6"));
     let k_exit = vk_of(&cfg.s("key_exit", "END"));
 
     loop {
@@ -184,6 +218,7 @@ fn main() {
         if keys.pressed(k_recoil) { let v = !cfg.b("norecoil", true); cfg.set("norecoil", if v { "1" } else { "0" }); dirty = true; }
         if keys.pressed(k_spread) { let v = !cfg.b("nospread", false); cfg.set("nospread", if v { "1" } else { "0" }); dirty = true; }
         if keys.pressed(k_reload) { cfg = read_cfg(&ini, &mirror); status.push("ini reload".into()); }
+        if keys.pressed(k_scan) { memr = None; game = None; status.push("rescan (F6)".into()); }
 
         for vk in 0x08..0x60 { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
         for vk in 0x60..0x6A { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
@@ -196,19 +231,50 @@ fn main() {
         let prev_click = ui.click;
         ui.click = lbtn && !prev_click;
 
-        if memr.is_none() && last_attach.elapsed().as_millis() > 1200 {
+        let mut alive = true;
+        if let Some(m) = memr.as_ref() {
+            let exe = cfg.s("exe", "RustClient.exe");
+            alive = mem::all_pids(&exe).contains(&m.pid);
+        }
+        if !alive { memr = None; game = None; status.push("igra ugasena".into()); }
+
+        if memr.is_none() && !busy.load(Ordering::Relaxed) && last_attach.elapsed().as_millis() > 1200 {
             last_attach = std::time::Instant::now();
-            match mem::attach4(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
-                Ok(m) => {
-                    status.clear();
-                    status.push(format!("OK pid={} base={:X} via={}", m.pid, m.base, m.found_via));
-                    game = Some(game::Game::new(dup_cfg(&cfg), m.base, (sw, sh)));
-                    memr = Some(m);
-                }
-                Err(e) => {
-                    status.clear();
-                    status.push(e);
-                    for r in mem::list_rust().iter().take(4) { status.push(r.clone()); }
+            busy.store(true, Ordering::Relaxed);
+            let s2 = slot.clone();
+            let b2 = busy.clone();
+            let exe = cfg.s("exe", "RustClient.exe");
+            let mods = cfg.s("module", "GameAssembly.dll,UnityPlayer.dll");
+            let fb = cfg.u("force_base", 0);
+            std::thread::spawn(move || {
+                let r = mem::attach5(&exe, &mods, fb);
+                if let Ok(mut g) = s2.lock() { *g = Some(r); }
+                b2.store(false, Ordering::Relaxed);
+            });
+        }
+
+        if memr.is_none() && !busy.load(Ordering::Relaxed) {
+            let taken = if let Ok(mut g) = slot.try_lock() { g.take() } else { None };
+            if let Some(r) = taken {
+                match r {
+                    Ok(m) => {
+                        status.clear();
+                        status.push(format!("OK pid={} base={:X} via={} {}",
+                                            m.pid, m.base, m.found_via, if m.writable { "RW" } else { "RO" }));
+                        if !m.writable { status.push("READ-ONLY -> norecoil ne pise".into()); }
+                        if cfg.u("force_base", 0) == 0 && m.found_via == "brute" {
+                            cfg.set("force_base", &format!("0x{:X}", m.base));
+                            dirty = true;
+                            status.push(format!("force_base sacuvan {:X}", m.base));
+                        }
+                        game = Some(game::Game::new(dup_cfg(&cfg), m.base, (sw, sh)));
+                        memr = Some(m);
+                    }
+                    Err(e) => {
+                        status.clear();
+                        status.push(format!("attach: {}", e));
+                        for r in mem::list_rust().iter().take(3) { status.push(r.clone()); }
+                    }
                 }
             }
         }
@@ -233,9 +299,7 @@ fn main() {
                     cfg.set("camera_matrix_off", &format!("0x{:X}", g.cam_delta));
                     dirty = true;
                     status.push(format!("cam ofs sacuvan {:X}+{:X}", g.cam_off, g.cam_delta));
-                } else {
-                    status.push("cam nije nadjen".into());
-                }
+                } else { status.push("cam nije nadjen".into()); }
             }
         }
 
@@ -279,21 +343,20 @@ fn main() {
             }
         }
 
-        status.truncate(8);
-        ui.status = status.clone();
+        let mut live: Vec<String> = status.clone();
+        if let Some(g) = game.as_ref() {
+            live.push(format!("base={:X} local={:X} view={} ply={}", g.base, g.local, g.view_ok as u8, g.players.len()));
+        }
+        live.truncate(9);
+        ui.status = live;
         ui.draw(&mut canvas, &mut cfg, game.as_ref().unwrap_or(&dummy));
 
         if let Some(g) = game.as_ref() {
-            let hud = format!("fps {:.0}  players {}  base {:X}  cam {}",
-                              fps, g.players.len(), g.base, if g.view_ok { "OK" } else { "--" });
+            let hud = format!("fps {:.0}  players {}  base {:X}  cam {}", fps, g.players.len(), g.base, if g.view_ok { "OK" } else { "--" });
             canvas.text(12, 4, &hud, 0, 220, 255, 255, 1);
         }
 
-        if dirty || ui.dirty {
-            save_cfg(&cfg, &ini, &mirror);
-            dirty = false;
-            ui.dirty = false;
-        }
+        if dirty || ui.dirty { save_cfg(&cfg, &ini, &mirror); dirty = false; ui.dirty = false; }
 
         unsafe {
             let dst = std::slice::from_raw_parts_mut(bits, (sw * sh) as usize);
@@ -307,9 +370,16 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 
+    drop(memr);
+
     if cleanup {
-        let _ = std::fs::remove_file(mem::exe_dir().join("attach_log.txt"));
-        let _ = std::fs::remove_file(mem::exe_dir().join("mods.txt"));
+        let d = temp_dir();
+        let _ = std::fs::remove_file(d.join("attach_log.txt"));
+        let _ = std::fs::remove_file(d.join("mods.txt"));
+        let exe = d.join("venice_rust.exe");
+        if exe.exists() {
+            let c = format!("ping -n 2 127.0.0.1 >nul & del /f /q \"{}\"", exe.display());
+            let _ = Command::new("cmd").arg("/c").arg(c).spawn();
+        }
     }
 }
-

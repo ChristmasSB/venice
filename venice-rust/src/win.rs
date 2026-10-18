@@ -64,6 +64,7 @@ pub const TOKEN_ADJUST_PRIVILEGES: DWORD = 0x0020;
 pub const TOKEN_QUERY: DWORD = 0x0008;
 pub const SE_PRIVILEGE_ENABLED: DWORD = 0x00000002;
 pub const TOKEN_ELEVATION: u32 = 20;
+pub const TOKEN_INTEGRITY_LEVEL: u32 = 25;
 
 pub const SEE_MASK_NOCLOSEPROCESS: DWORD = 0x00000040;
 
@@ -274,6 +275,7 @@ extern "system" {
     pub fn EnumProcessModulesEx(h: HANDLE, mods: *mut HMODULE, cb: DWORD, needed: *mut DWORD, filter: DWORD) -> BOOL;
     pub fn GetModuleBaseNameA(h: HANDLE, m: HMODULE, buf: *mut u8, size: DWORD) -> DWORD;
     pub fn GetModuleInformation(h: HANDLE, m: HMODULE, mi: *mut MODULEINFO, cb: DWORD) -> BOOL;
+    pub fn GetMappedFileNameA(h: HANDLE, addr: *mut c_void, buf: *mut u8, n: DWORD) -> DWORD;
 }
 
 #[link(name = "ntdll")]
@@ -282,3 +284,9 @@ extern "system" {
     pub fn NtQueryVirtualMemory(h: HANDLE, addr: *mut c_void, class: u32, info: *mut c_void,
                                 len: SIZE_T, ret: *mut SIZE_T) -> NTSTATUS;
 }
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn SetLastError(code: DWORD);
+}
+
