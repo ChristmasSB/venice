@@ -1,6 +1,6 @@
-=== venice attach t=1792350878 ===
-admin=true debugpriv=true bitness=64 IL=HIGH(ADMIN) rpm_fails=1602 rpm_err=5
+=== venice attach t=1792352772 ===
+admin=true debugpriv=true bitness=64 IL=HIGH(ADMIN) rpm_fails=828 rpm_err=5
 pids(RustClient.exe) = [29440] dead=[]
-rust-procesi: ["EasyAntiCheat_EOS.exe [27100]", "RustClient.exe [29440]", "venice_rust.exe [21900]"]
+rust-procesi: ["EasyAntiCheat_EOS.exe [27100]", "RustClient.exe [29440]", "venice_rust.exe [23244]"]
 -- pid 29440 IL=MEDIUM
 pid29440 rights=ql+vmrw writable=true wow64=0 img=E:\SteamLibrary\steamapps\common\Rust\RustClient.exe

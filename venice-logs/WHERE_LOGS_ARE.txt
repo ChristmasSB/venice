@@ -1,4 +1,4 @@
-t=1792350709
+t=1792352672
 exe_dir=C:\Users\petar\AppData\Local\Temp\venice_rust
 admin=true
 --- log folderi ---

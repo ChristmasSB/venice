@@ -1,0 +1,4 @@
+target=29440 peb=C237147000
+total_handles=119747
+process_type_index=8
+owners=46 dups=815 hits=0 best=false
