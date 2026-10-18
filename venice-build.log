@@ -1,0 +1,32 @@
+=== p10fix 10/18/2026 01:50:59 ===
+[+] win.rs: PSAPI dodan
+[+] mem.rs: attach2 + dijagnostika
+[+] main.rs: attach -> attach2
+[+] rust.ini: module = GameAssembly.dll,UnityPlayer.dll
+[*] build...
+[*] build x86_64-pc-windows-msvc
+       Compiling venice_rust v3.1.0 (C:\Users\petar\venice-rust)
+    error[E0599]: no associated function or constant named `attach2` found for struct `Mem` in the current scope
+       --> src\main.rs:222:29
+        |
+    222 |             match mem::Mem::attach2(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
+        |                             ^^^^^^^ associated function or constant not found in `Mem`
+        |
+       ::: src\mem.rs:4:1
+        |
+      4 | pub struct Mem { pub handle: HANDLE, pub pid: u32, pub base: u64, pub size: u64 }
+        | -------------- associated function or constant `attach2` not found for this struct
+        |
+    note: if you're trying to build a new `Mem`, consider using `Mem::attach` which returns `Result<Mem, String>`
+       --> src\mem.rs:71:5
+        |
+     71 |     pub fn attach(exe: &str, module: &str) -> Result<Mem, String> {
+        |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    help: there is an associated function `attach` with a similar name
+        |
+    222 -             match mem::Mem::attach2(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
+    222 +             match mem::Mem::attach(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
+        |
+    System.Management.Automation.RemoteException
+    For more information about this error, try `rustc --explain E0599`.
+    error: could not compile `venice_rust` (bin "venice_rust") due to 1 previous error
