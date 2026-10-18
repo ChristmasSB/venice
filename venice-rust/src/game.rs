@@ -26,6 +26,7 @@ pub struct Game {
     pub cam_delta: u64,
     pub cam_src: String,
     pub scan_budget: i32,
+    pub cam_miss: u32,
 }
 
 pub fn w2s(m: &[f32; 16], p: [f32; 3], w: i32, h: i32) -> Option<(i32, i32)> {
@@ -39,9 +40,14 @@ pub fn w2s(m: &[f32; 16], p: [f32; 3], w: i32, h: i32) -> Option<(i32, i32)> {
     Some((sx as i32, sy as i32))
 }
 
+fn ptr_ok(p: u64) -> bool { p > 0x10000 && p < 0x0000_7FFF_FFFF_FFFF }
+
 fn read_mat(mem: &Mem, a: u64) -> [f32; 16] {
-    let mut m = [0f32; 16];
-    for i in 0..16 { m[i] = mem.read_f32(a + (i as u64) * 4); }
+    let mut raw = [0u8; 64];
+    if !mem.read(a, &mut raw) { return [0.0f32; 16]; }
+    let mut m = [0.0f32; 16];
+    let mut i = 0usize;
+    while i < 16 { m[i] = f32::from_le_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]]); i += 1; }
     m
 }
 
@@ -68,7 +74,7 @@ impl Game {
             players: Vec::new(), local: 0,
             view: [0.0; 16], view_ok: false,
             cam_ptr: 0, cam_off: 0, cam_delta: 0, cam_src: String::new(),
-            scan_budget: 2,
+            scan_budget: 4, cam_miss: 0,
         }
     }
 
@@ -88,8 +94,7 @@ impl Game {
         if u32mode { (!mem.read_u32(v1 + 8 * slot)) as u64 } else { mem.read_u64(v1 + 8 * slot) }
     }
 
-    fn pos_of(&self, mem: &Mem, p: u64) -> Option<[f32; 3]> {
-        let chain = self.cfg.s("pos_chain", "0x348,0x10,0x38");
+    fn chain_of(&self, mem: &Mem, p: u64, chain: &str) -> Option<[f32; 3]> {
         let parts: Vec<&str> = chain.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect();
         if parts.is_empty() { return None; }
         let mut a = p;
@@ -107,6 +112,15 @@ impl Game {
             a = mem.read_u64(a + off);
         }
         None
+    }
+
+    fn pos_of(&self, mem: &Mem, p: u64) -> Option<[f32; 3]> {
+        let c1 = self.cfg.s("pos_chain", "0x348,0x10,0x38");
+        if let Some(v) = self.chain_of(mem, p, &c1) { return Some(v); }
+        let c2 = self.cfg.s("pos_chain2", "0x348,0x10,0x30");
+        if let Some(v) = self.chain_of(mem, p, &c2) { return Some(v); }
+        let c3 = self.cfg.s("pos_chain3", "0x2C8,0x10,0x38");
+        self.chain_of(mem, p, &c3)
     }
 
     pub fn resolve_local(&self, mem: &Mem) -> u64 {
@@ -128,8 +142,9 @@ impl Game {
 
         if self.cam_ptr != 0 {
             let m = read_mat(mem, self.cam_ptr + self.cam_delta);
-            if valid_view(&m, lp, lp_ok) { self.view = m; return true; }
+            if valid_view(&m, lp, lp_ok) { self.view = m; self.cam_miss = 0; return true; }
             self.cam_ptr = 0;
+            self.cam_miss = 0;
         }
 
         let cam = self.cfg.u("camera_static", 0);
@@ -137,11 +152,11 @@ impl Game {
             let statics = mem.read_u64(self.base + cam + self.cfg.u("static_fields", 0xB8));
             if statics != 0 {
                 let inst = mem.read_u64(statics + self.cfg.u("camera_instance", 0x30));
-                if inst > 0x10000 {
+                if ptr_ok(inst) {
                     let m = read_mat(mem, inst + w2c);
                     if valid_view(&m, lp, lp_ok) {
                         self.view = m; self.cam_ptr = inst; self.cam_delta = w2c;
-                        self.cam_src = "camera_static".to_string();
+                        self.cam_src = "camera_static".to_string(); self.cam_miss = 0;
                         return true;
                     }
                 }
@@ -152,30 +167,31 @@ impl Game {
         if via != 0 && self.local != 0 {
             let p = mem.read_u64(self.local + via);
             let d = self.cfg.u("camera_matrix_off", w2c);
-            if p > 0x10000 {
+            if ptr_ok(p) {
                 let m = read_mat(mem, p + d);
                 if valid_view(&m, lp, lp_ok) {
                     self.view = m; self.cam_ptr = p; self.cam_delta = d; self.cam_off = via;
-                    self.cam_src = "via_player".to_string();
+                    self.cam_src = "via_player".to_string(); self.cam_miss = 0;
                     return true;
                 }
             }
         }
 
-        if self.scan_budget > 0 && self.local != 0 && self.cfg.b("cam_auto", true) {
-            self.scan_budget -= 1;
-            if self.cam_scan(mem, lp, lp_ok, w2c) { return true; }
-        }
+        if !self.cfg.b("cam_auto", true) || self.local == 0 { return false; }
+        self.cam_miss = self.cam_miss.wrapping_add(1);
+        let period = self.cfg.u("cam_scan_period", 90).max(5) as u32;
+        if self.cam_miss > 2 && self.cam_miss % period != 0 { return false; }
+        if self.cam_scan(mem, lp, lp_ok, w2c) { self.cam_miss = 0; return true; }
         false
     }
 
     fn cam_scan(&mut self, mem: &Mem, lp: [f32; 3], lp_ok: bool, w2c: u64) -> bool {
-        let deltas: [u64; 6] = [w2c, 0x2E0, 0x2D0, 0x2F0, 0x300, 0x280];
-        for off in (0..0x800u64).step_by(8) {
+        let deltas: [u64; 12] = [w2c, 0x2E0, 0x2D0, 0x2F0, 0x300, 0x280, 0x2C0, 0x310, 0x1A0, 0x2B0, 0x260, 0x340];
+        for off in (0..0x1000u64).step_by(8) {
             let p = mem.read_u64(self.local + off);
-            if p < 0x10000 || p > 0x0000_7FFF_FFFF_FFFF { continue; }
+            if !ptr_ok(p) { continue; }
             for d in deltas.iter() {
-                let m = read_mat(mem, p + d);
+                let m = read_mat(mem, p + *d);
                 if valid_view(&m, lp, lp_ok) {
                     self.view = m; self.cam_ptr = p; self.cam_delta = *d; self.cam_off = off;
                     self.cam_src = format!("scan {:X}+{:X}", off, d);
@@ -183,11 +199,11 @@ impl Game {
                 }
             }
         }
-        for off in (0..0x400u64).step_by(8) {
+        for off in (0..0x600u64).step_by(8) {
             let p = mem.read_u64(self.local + off);
-            if p < 0x10000 { continue; }
+            if !ptr_ok(p) { continue; }
             let mut d = 0u64;
-            while d < 0x400 {
+            while d < 0x800 {
                 let m = read_mat(mem, p + d);
                 if valid_view(&m, lp, lp_ok) {
                     self.view = m; self.cam_ptr = p; self.cam_delta = d; self.cam_off = off;
@@ -195,6 +211,20 @@ impl Game {
                     return true;
                 }
                 d += 0x10;
+            }
+        }
+        if self.base != 0 {
+            for off in (0..0x3000u64).step_by(8) {
+                let p = mem.read_u64(self.base + off);
+                if !ptr_ok(p) { continue; }
+                for d in deltas.iter() {
+                    let m = read_mat(mem, p + *d);
+                    if valid_view(&m, lp, lp_ok) {
+                        self.view = m; self.cam_ptr = p; self.cam_delta = *d; self.cam_off = 0;
+                        self.cam_src = format!("static {:X}+{:X}", off, d);
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -248,6 +278,7 @@ impl Game {
                 let dz = p[2] - lpos[2];
                 pl.dist = (dx * dx + dy * dy + dz * dz).sqrt();
             }
+            if pl.dist <= 0.1 { continue; }
             if self.view_ok {
                 pl.screen = w2s(&self.view, pl.pos, self.screen.0, self.screen.1);
                 let head = [pl.pos[0], pl.pos[1] + self.cfg.f("head_h", 1.65), pl.pos[2]];
@@ -256,21 +287,21 @@ impl Game {
             out.push(pl);
         }
         out.sort_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap_or(std::cmp::Ordering::Equal));
+        if out.len() > 300 { out.truncate(300); }
         self.players = out;
     }
 
     fn held_items(&self, mem: &Mem) -> Vec<u64> {
-        let mut v = Vec::new();
+        let mut v: Vec<u64> = Vec::new();
         if self.local == 0 { return v; }
 
-        // 1) direktno: BasePlayer.heldEntity (najbrze i najtacnije)
-        let ho = self.cfg.u("player_held", 0x5B8);
-        if ho != 0 {
-            let h = mem.read_u64(self.local + ho);
-            if h > 0x10000 && h < 0x0000_7FFF_FFFF_FFFF { v.push(h); }
+        for (k, d) in [("player_held", 0x5B8u64), ("player_held2", 0x5C0u64)] {
+            let o = self.cfg.u(k, d);
+            if o == 0 { continue; }
+            let h = mem.read_u64(self.local + o);
+            if ptr_ok(h) { v.push(h); }
         }
 
-        // 2) rezervno: preko inventara (main/belt/wear)
         let inv = mem.read_u64(self.local + self.cfg.u("player_inventory", 0x510));
         if inv != 0 {
             for b in 0..3u64 {
@@ -286,7 +317,7 @@ impl Game {
                     let it = mem.read_u64(data + 8 * i as u64);
                     if it == 0 { continue; }
                     let h = mem.read_u64(it + self.cfg.u("item_heldentity", 0x88));
-                    if h > 0x10000 { v.push(h); }
+                    if ptr_ok(h) { v.push(h); }
                 }
             }
         }
@@ -297,16 +328,21 @@ impl Game {
     }
 
     fn recoil_props_of(&self, mem: &Mem, h: u64) -> u64 {
-        let mut rp = mem.read_u64(h + self.cfg.u("recoil_props", 0x3A8));
-        if rp > 0x10000 && rp < 0x0000_7FFF_FFFF_FFFF { return rp; }
         let list = self.cfg.s("recoil_props_list", "0x3A8,0x3B0,0x3A0,0x398,0x3B8");
         for st in list.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
             let o = cfg::num(st);
             if o == 0 { continue; }
-            let c = mem.read_u64(h + o);
-            if c > 0x10000 && c < 0x0000_7FFF_FFFF_FFFF { return c; }
+            let p = mem.read_u64(h + o);
+            if ptr_ok(p) && (p & 7) == 0 {
+                let a = mem.read_f32(p + 0x10);
+                let b = mem.read_f32(p + 0x14);
+                let c = mem.read_f32(p + 0x18);
+                let d = mem.read_f32(p + 0x1C);
+                let good = [a, b, c, d].iter().filter(|v| v.is_finite() && v.abs() < 100.0).count();
+                if good >= 3 { return p; }
+            }
         }
-        0
+        h + self.cfg.u("recoil_props", 0x3A8)
     }
 
     pub fn norecoil(&self, mem: &Mem) -> bool {

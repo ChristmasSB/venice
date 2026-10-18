@@ -159,7 +159,7 @@ fn main() {
         "t={}\nexe_dir={}\nadmin={}\n--- log folderi ---\n{}\n",
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
         _orig_dir.display(), mem::is_admin(), _all.join("\n")));
-    mem::write_log("last_run.txt", &format!("start t={} exe_dir={}\n",
+    mem::write_log("last_run.txt", &format!("start t={} exe_dir={} BUILD=P2\n",
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
         _orig_dir.display()));
 

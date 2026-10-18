@@ -30,6 +30,9 @@ pub const PROCESS_VM_WRITE: DWORD = 0x0020;
 pub const PROCESS_VM_OPERATION: DWORD = 0x0008;
 pub const PROCESS_QUERY_INFORMATION: DWORD = 0x0400;
 pub const PROCESS_QUERY_LIMITED: DWORD = 0x1000;
+pub const PROCESS_DUP_HANDLE: DWORD = 0x0040;
+pub const DUPLICATE_SAME_ACCESS: DWORD = 0x00000002;
+pub const STILL_ACTIVE: DWORD = 259;
 
 pub const TH32CS_SNAPPROCESS: DWORD = 0x00000002;
 pub const TH32CS_SNAPMODULE: DWORD = 0x00000008;
@@ -206,6 +209,18 @@ pub struct MEMORY_BASIC_INFORMATION {
 #[repr(C)]
 pub struct UNICODE_STRING { pub Length: u16, pub MaximumLength: u16, pub Buffer: *mut u16 }
 
+#[repr(C)] #[derive(Clone, Copy, Default)]
+pub struct SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX {
+    pub Object: *mut c_void,
+    pub UniqueProcessId: usize,
+    pub HandleValue: usize,
+    pub GrantedAccess: u32,
+    pub CreatorBackTraceIndex: u16,
+    pub ObjectTypeIndex: u16,
+    pub HandleAttributes: u32,
+    pub Reserved: u32,
+}
+
 #[link(name = "kernel32")]
 extern "system" {
     pub fn OpenProcess(a: DWORD, b: BOOL, c: DWORD) -> HANDLE;
@@ -213,6 +228,7 @@ extern "system" {
     pub fn ReadProcessMemory(h: HANDLE, base: *const u8, buf: *mut u8, size: usize, read: *mut usize) -> BOOL;
     pub fn WriteProcessMemory(h: HANDLE, base: *mut u8, buf: *const u8, size: usize, written: *mut usize) -> BOOL;
     pub fn GetLastError() -> DWORD;
+    pub fn SetLastError(code: DWORD);
     pub fn Sleep(ms: DWORD);
     pub fn GetModuleHandleA(name: *const u8) -> HMODULE;
     pub fn CreateToolhelp32Snapshot(flags: DWORD, pid: DWORD) -> HANDLE;
@@ -221,10 +237,14 @@ extern "system" {
     pub fn Module32First(h: HANDLE, me: *mut MODULEENTRY32) -> BOOL;
     pub fn Module32Next(h: HANDLE, me: *mut MODULEENTRY32) -> BOOL;
     pub fn GetCurrentProcess() -> HANDLE;
+    pub fn GetCurrentProcessId() -> DWORD;
     pub fn GetModuleFileNameA(h: HMODULE, buf: *mut u8, n: DWORD) -> DWORD;
     pub fn GetCommandLineA() -> *const u8;
     pub fn VirtualQueryEx(h: HANDLE, addr: *const c_void, mbi: *mut MEMORY_BASIC_INFORMATION, len: SIZE_T) -> SIZE_T;
     pub fn QueryFullProcessImageNameA(h: HANDLE, flags: DWORD, buf: *mut u8, n: *mut DWORD) -> BOOL;
+    pub fn GetExitCodeProcess(h: HANDLE, code: *mut DWORD) -> BOOL;
+    pub fn DuplicateHandle(src: HANDLE, s: HANDLE, dst: HANDLE, t: *mut HANDLE, acc: DWORD, inherit: BOOL, opts: DWORD) -> BOOL;
+    pub fn IsWow64Process(h: HANDLE, wow: *mut BOOL) -> BOOL;
 }
 
 #[link(name = "advapi32")]
@@ -283,10 +303,8 @@ extern "system" {
     pub fn NtQueryInformationProcess(h: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> NTSTATUS;
     pub fn NtQueryVirtualMemory(h: HANDLE, addr: *mut c_void, class: u32, info: *mut c_void,
                                 len: SIZE_T, ret: *mut SIZE_T) -> NTSTATUS;
+    pub fn NtReadVirtualMemory(h: HANDLE, base: *mut c_void, buf: *mut c_void, size: SIZE_T, read: *mut SIZE_T) -> NTSTATUS;
+    pub fn NtWriteVirtualMemory(h: HANDLE, base: *mut c_void, buf: *const c_void, size: SIZE_T, written: *mut SIZE_T) -> NTSTATUS;
+    pub fn NtQuerySystemInformation(class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> NTSTATUS;
+    pub fn NtQueryObject(h: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> NTSTATUS;
 }
-
-#[link(name = "kernel32")]
-extern "system" {
-    pub fn SetLastError(code: DWORD);
-}
-

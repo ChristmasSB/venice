@@ -3,6 +3,14 @@ use crate::win::*;
 use std::ffi::c_void;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+pub static RPM_FAILS: AtomicU32 = AtomicU32::new(0);
+pub static RPM_ERR: AtomicU32 = AtomicU32::new(0);
+pub static NT_READS: AtomicU32 = AtomicU32::new(0);
+pub static NT_WRITES: AtomicU32 = AtomicU32::new(0);
+pub static WPM_FAILS: AtomicU32 = AtomicU32::new(0);
+pub static WRITES_OK: AtomicU32 = AtomicU32::new(0);
 
 pub struct Mem {
     pub handle: HANDLE,
@@ -13,6 +21,7 @@ pub struct Mem {
     pub found_via: String,
     pub base_name: String,
     pub elevated: bool,
+    pub read_ok: bool,
     cache: RefCell<HashMap<u64, f32>>,
 }
 
@@ -187,6 +196,50 @@ pub fn all_pids_contains(name: &str) -> Vec<u32> {
     v
 }
 
+pub fn all_pids_any() -> Vec<u32> {
+    let mut v = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE { return v; }
+        let mut pe: PROCESSENTRY32 = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+        let mut ok = Process32First(snap, &mut pe);
+        while ok != 0 { v.push(pe.th32ProcessID); ok = Process32Next(snap, &mut pe); }
+        CloseHandle(snap);
+    }
+    v
+}
+
+pub fn pids_by_path(needle: &str) -> Vec<u32> {
+    let mut v = Vec::new();
+    let n = needle.to_ascii_lowercase();
+    for pid in all_pids_any() {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED, 0, pid);
+            if h.is_null() { continue; }
+            let mut buf = [0u8; 1024];
+            let mut len: DWORD = 1024;
+            let ok = QueryFullProcessImageNameA(h, 0, buf.as_mut_ptr(), &mut len);
+            CloseHandle(h);
+            if ok == 0 { continue; }
+            let s = cstr(&buf[..len as usize]).to_ascii_lowercase();
+            if s.contains(&n) { v.push(pid); }
+        }
+    }
+    v
+}
+
+pub fn alive(pid: u32) -> bool {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED, 0, pid);
+        if h.is_null() { return false; }
+        let mut c: DWORD = 0;
+        let ok = GetExitCodeProcess(h, &mut c);
+        CloseHandle(h);
+        ok != 0 && c == STILL_ACTIVE
+    }
+}
+
 pub fn list_rust() -> Vec<String> {
     let mut v = Vec::new();
     unsafe {
@@ -197,7 +250,8 @@ pub fn list_rust() -> Vec<String> {
         let mut ok = Process32First(snap, &mut pe);
         while ok != 0 {
             let n = cstr(&pe.szExeFile);
-            if n.to_ascii_lowercase().contains("rust") { v.push(format!("{} [{}]", n, pe.th32ProcessID)); }
+            let l = n.to_ascii_lowercase();
+            if l.contains("rust") || l.contains("easyanticheat") { v.push(format!("{} [{}]", n, pe.th32ProcessID)); }
             ok = Process32Next(snap, &mut pe);
         }
         CloseHandle(snap);
@@ -269,10 +323,41 @@ pub fn nt_peb(h: HANDLE) -> u64 {
     p.peb as u64
 }
 
-fn read_h(h: HANDLE, a: u64, b: &mut [u8]) -> bool {
-    if a == 0 { return false; }
+pub fn read_h(h: HANDLE, a: u64, b: &mut [u8]) -> bool {
+    if a == 0 || b.is_empty() { return false; }
     let mut n = 0usize;
-    unsafe { ReadProcessMemory(h, a as *const u8, b.as_mut_ptr(), b.len(), &mut n) != 0 && n == b.len() }
+    unsafe {
+        SetLastError(0);
+        if ReadProcessMemory(h, a as *const u8, b.as_mut_ptr(), b.len(), &mut n) != 0 && n == b.len() { return true; }
+        let e = GetLastError();
+        if e != 0 { RPM_ERR.store(e, Ordering::Relaxed); }
+    }
+    let mut n2 = 0usize;
+    let st = unsafe { NtReadVirtualMemory(h, a as *mut c_void, b.as_mut_ptr() as *mut c_void, b.len(), &mut n2) };
+    if st == 0 && n2 == b.len() { NT_READS.fetch_add(1, Ordering::Relaxed); return true; }
+    RPM_FAILS.fetch_add(1, Ordering::Relaxed);
+    let mut n3 = 0usize;
+    unsafe {
+        SetLastError(0);
+        if ReadProcessMemory(h, a as *const u8, b.as_mut_ptr(), b.len(), &mut n3) != 0 && n3 == b.len() { return true; }
+    }
+    false
+}
+
+pub fn write_h(h: HANDLE, a: u64, b: &[u8]) -> bool {
+    if a == 0 || b.is_empty() { return false; }
+    let mut n = 0usize;
+    unsafe {
+        if WriteProcessMemory(h, a as *mut u8, b.as_ptr(), b.len(), &mut n) != 0 && n == b.len() {
+            WRITES_OK.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+    }
+    let mut n2 = 0usize;
+    let st = unsafe { NtWriteVirtualMemory(h, a as *mut c_void, b.as_ptr() as *const c_void, b.len(), &mut n2) };
+    if st == 0 && n2 == b.len() { NT_WRITES.fetch_add(1, Ordering::Relaxed); return true; }
+    WPM_FAILS.fetch_add(1, Ordering::Relaxed);
+    false
 }
 
 fn read_u64_h(h: HANDLE, a: u64) -> u64 { let mut b = [0u8; 8]; if read_h(h, a, &mut b) { u64::from_le_bytes(b) } else { 0 } }
@@ -351,10 +436,8 @@ pub fn dump_peb(h: HANDLE) {
                 for j in 0..16 { s.push_str(&format!(" {:02X}", raw[i + j])); }
                 s.push('\n');
             }
-        } else { s.push_str("raw RPM FAIL\n"); }
-        s.push_str(&format!("ldr@18={:X} ldr@0C={:X} imgbase@10={:X} imgbase@08={:X}\n",
-                            read_u64_h(h, peb + 0x18), read_u64_h(h, peb + 0x0C) & 0xFFFF_FFFF,
-                            read_u64_h(h, peb + 0x10), read_u64_h(h, peb + 0x08) & 0xFFFF_FFFF));
+        } else { s.push_str("raw read FAIL\n"); }
+        s.push_str(&format!("ldr@18={:X} ldr@0C={:X}\n", read_u64_h(h, peb + 0x18), read_u64_h(h, peb + 0x0C) & 0xFFFF_FFFF));
         s.push_str(&format!("walk64={} walk32={}\n", walk64(h, peb).len(), walk32(h, peb).len()));
     }
     write_log("peb.txt", &s);
@@ -426,25 +509,24 @@ pub fn mod_base_brute(h: HANDLE, name: &str) -> Option<u64> {
 }
 
 pub fn bases_scan(h: HANDLE, out: &mut String) {
-    out.push_str(&format!("=== bases scan t={} ===\n", stamp()));
-    let mut buf = [0u8; 0x40];
-    let bands: [(u64, u64); 2] = [
-        (0x0000_0000_0001_0000, 0x0000_0010_0000_0000),
-        (0x0000_7FF0_0000_0000, 0x0000_7FFF_FFFF_0000),
-    ];
+    out.push_str(&format!("=== bases scan VQ t={} rpm_fails={} rpm_err={} nt={} ===\n", stamp(),
+        RPM_FAILS.load(Ordering::Relaxed), RPM_ERR.load(Ordering::Relaxed), NT_READS.load(Ordering::Relaxed)));
+    let mut addr: u64 = 0x10000;
+    let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut nb = [0u8; 512];
     let mut n = 0u32;
-    for (mut a, end) in bands {
-        while a < end {
-            if read_h(h, a, &mut buf) && buf[0] == b'M' && buf[1] == b'Z' {
-                let e = u32::from_le_bytes([buf[0x3C], buf[0x3D], buf[0x3E], buf[0x3F]]) as u64;
-                if e > 0x40 && e < 0x1000 {
-                    let nm = pe_name(h, a).unwrap_or_else(|| "?".to_string());
-                    out.push_str(&format!("{:016X} {}\n", a, nm));
-                    n += 1;
-                }
-            }
-            a += 0x10000;
+    let mut guard = 0u32;
+    while addr < 0x0000_7FFF_FFFF_0000 && guard < 3000000 {
+        guard += 1;
+        if unsafe { VirtualQueryEx(h, addr as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 { break; }
+        let size = mbi.RegionSize as u64;
+        if mbi.State == MEM_COMMIT && mbi.Type == MEM_IMAGE {
+            let l = unsafe { GetMappedFileNameA(h, mbi.BaseAddress, nb.as_mut_ptr(), nb.len() as DWORD) };
+            let nm = if l > 0 { cstr(&nb[..l as usize]) } else { "?".to_string() };
+            out.push_str(&format!("{:016X} size={:X} {}\n", mbi.BaseAddress as u64, size, nm));
+            n += 1;
         }
+        addr += if size == 0 { 0x1000 } else { size };
     }
     out.push_str(&format!("ukupno {}\n", n));
 }
@@ -455,19 +537,12 @@ fn mz(h: HANDLE, base: u64) -> bool {
 }
 
 fn handle_ok(h: HANDLE, need_write: bool) -> bool {
-    unsafe {
-        let peb = nt_peb(h);
-        if peb == 0 { return false; }
-        let mut b = [0u8; 8];
-        let mut n = 0usize;
-        if ReadProcessMemory(h, peb as *const u8, b.as_mut_ptr(), 8, &mut n) == 0 { return false; }
-        if n != 8 { return false; }
-        if need_write {
-            let mut w = 0usize;
-            if WriteProcessMemory(h, peb as *mut u8, b.as_ptr(), 8, &mut w) == 0 { return false; }
-        }
-        true
-    }
+    let peb = nt_peb(h);
+    if peb == 0 { return false; }
+    let mut b = [0u8; 8];
+    if !read_h(h, peb, &mut b) { return false; }
+    if need_write { return write_h(h, peb, &b); }
+    true
 }
 
 fn open_best(pid: u32) -> Option<(HANDLE, &'static str, bool)> {
@@ -492,54 +567,279 @@ fn open_best(pid: u32) -> Option<(HANDLE, &'static str, bool)> {
             }
             if first.is_none() { first = Some((h, label, w)); } else { CloseHandle(h); }
         }
+        if let Some((hj, hw)) = hijack_handle(pid) {
+            if handle_ok(hj, hw) {
+                if let Some((fh, _, _)) = first { CloseHandle(fh); }
+                return Some((hj, "hijack", hw));
+            }
+            CloseHandle(hj);
+        }
     }
     first
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ObjBasic { attributes: u32, granted_access: u32, handle_count: u32, pointer_count: u32, reserved: [u32; 10] }
+
+pub fn granted_access(h: HANDLE) -> u32 {
+    let mut o: ObjBasic = unsafe { std::mem::zeroed() };
+    let mut ret: u32 = 0;
+    let st = unsafe { NtQueryObject(h, 0, &mut o as *mut ObjBasic as *mut c_void, std::mem::size_of::<ObjBasic>() as u32, &mut ret) };
+    if st != 0 { return 0; }
+    o.granted_access
+}
+
+pub fn hijack_handle(pid: u32) -> Option<(HANDLE, bool)> {
+    let mut rep = String::new();
+    let hq = unsafe { OpenProcess(PROCESS_QUERY_LIMITED, 0, pid) };
+    if hq.is_null() { write_log("handles.txt", "nema query handle\n"); return None; }
+    let peb = nt_peb(hq);
+    rep.push_str(&format!("target={} peb={:X}\n", pid, peb));
+    if peb == 0 { unsafe { CloseHandle(hq); } write_log("handles.txt", &rep); return None; }
+
+    let self_pid = std::process::id();
+    let hself = unsafe { OpenProcess(PROCESS_QUERY_LIMITED, 0, self_pid) };
+    let me = unsafe { GetCurrentProcess() };
+
+    unsafe {
+        let mut len: u32 = 0x400000;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut st: i32 = -1;
+        for _ in 0..6 {
+            buf.clear();
+            buf.resize(len as usize, 0);
+            st = NtQuerySystemInformation(64, buf.as_mut_ptr() as *mut c_void, len, &mut len);
+            if st == 0 { break; }
+            len = len.saturating_mul(2).max(0x400000);
+        }
+        if st != 0 { CloseHandle(hq); if !hself.is_null() { CloseHandle(hself); } write_log("handles.txt", "NtQuerySystemInformation FAIL\n"); return None; }
+        let n = *(buf.as_ptr() as *const usize);
+        if n == 0 || n > 30_000_000 { CloseHandle(hq); if !hself.is_null() { CloseHandle(hself); } write_log("handles.txt", "n cudan\n"); return None; }
+        let base = buf.as_ptr().add(16) as *const SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX;
+        rep.push_str(&format!("total_handles={}\n", n));
+
+        let mut proc_idx: u16 = 0;
+        if !hself.is_null() {
+            for i in 0..n {
+                let e = &*base.add(i);
+                if e.UniqueProcessId == self_pid as usize && e.HandleValue == hself as usize { proc_idx = e.ObjectTypeIndex; break; }
+            }
+        }
+        rep.push_str(&format!("process_type_index={}\n", proc_idx));
+
+        let mut owners: Vec<(u32, HANDLE, String)> = Vec::new();
+        let mut best: Option<(HANDLE, bool)> = None;
+        let mut hits = 0u32;
+        let mut dups = 0u32;
+
+        for i in 0..n {
+            let e = &*base.add(i);
+            let owner = e.UniqueProcessId as u32;
+            if owner == self_pid || e.HandleValue == 0 { continue; }
+            if proc_idx != 0 && e.ObjectTypeIndex != proc_idx { continue; }
+            if e.GrantedAccess & PROCESS_VM_READ == 0 { continue; }
+
+            let oi = match owners.iter().position(|(p, _, _)| *p == owner) {
+                Some(x) => x,
+                None => {
+                    let hp = OpenProcess(PROCESS_DUP_HANDLE, 0, owner);
+                    let mut nm = String::new();
+                    let h2 = OpenProcess(PROCESS_QUERY_LIMITED, 0, owner);
+                    if !h2.is_null() {
+                        let mut nb = [0u8; 512];
+                        let mut l: DWORD = 512;
+                        if QueryFullProcessImageNameA(h2, 0, nb.as_mut_ptr(), &mut l) != 0 { nm = cstr(&nb[..l as usize]); }
+                        CloseHandle(h2);
+                    }
+                    owners.push((owner, hp, nm));
+                    owners.len() - 1
+                }
+            };
+            let hp = owners[oi].1;
+            if hp.is_null() { continue; }
+            let mut out: HANDLE = std::ptr::null_mut();
+            if DuplicateHandle(hp, e.HandleValue as HANDLE, me, &mut out, 0, 0, DUPLICATE_SAME_ACCESS) == 0 || out.is_null() { continue; }
+            dups += 1;
+
+            let mut b = [0u8; 8];
+            let mut got = 0usize;
+            SetLastError(0);
+            if ReadProcessMemory(out, (peb + 0x10) as *const u8, b.as_mut_ptr(), 8, &mut got) == 0 || got != 8 { CloseHandle(out); continue; }
+            let ib = u64::from_le_bytes(b);
+            let mut mbi2: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            let imgok = VirtualQueryEx(hq, ib as *const c_void, &mut mbi2, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0
+                        && mbi2.State == MEM_COMMIT && mbi2.Type == MEM_IMAGE && (mbi2.AllocationBase as u64) == ib;
+            if !imgok { CloseHandle(out); continue; }
+
+            let mut p: PBI = std::mem::zeroed();
+            let mut ret: u32 = 0;
+            if NtQueryInformationProcess(out, 0, &mut p as *mut PBI as *mut c_void, std::mem::size_of::<PBI>() as u32, &mut ret) == 0 && p.pid != pid as usize { CloseHandle(out); continue; }
+
+            hits += 1;
+            let ga = granted_access(out);
+            rep.push_str(&format!("HIT owner={} ({}) hv={:X} entry_acc={:X} granted={:X} imgbase={:X}\n",
+                owner, owners[oi].2, e.HandleValue, e.GrantedAccess, ga, ib));
+            if ga & PROCESS_VM_READ != 0 {
+                let w = (ga & PROCESS_VM_WRITE) != 0 && (ga & PROCESS_VM_OPERATION) != 0;
+                if w {
+                    rep.push_str("OK writable hijack\n");
+                    for (_, h, _) in owners.iter() { if !h.is_null() { CloseHandle(*h); } }
+                    CloseHandle(hq); if !hself.is_null() { CloseHandle(hself); }
+                    write_log("handles.txt", &rep);
+                    return Some((out, true));
+                }
+                if best.is_none() { best = Some((out, false)); } else { CloseHandle(out); }
+            } else { CloseHandle(out); }
+        }
+        rep.push_str(&format!("owners={} dups={} hits={} best={}\n", owners.len(), dups, hits, best.is_some()));
+        for (_, h, _) in owners.iter() { if !h.is_null() { CloseHandle(*h); } }
+        CloseHandle(hq); if !hself.is_null() { CloseHandle(hself); }
+        write_log("handles.txt", &rep);
+        best
+    }
+}
+
+pub fn self_test() {
+    let mut s = String::new();
+    s.push_str(&format!("=== selftest t={} admin={} bit={} ===\n", stamp(), is_admin(), std::mem::size_of::<usize>() * 8));
+    unsafe {
+        let me = GetCurrentProcess();
+        let peb = nt_peb(me);
+        let mut b = [0u8; 8];
+        let mut n = 0usize;
+        SetLastError(0);
+        let rpm = ReadProcessMemory(me, peb as *const u8, b.as_mut_ptr(), 8, &mut n) != 0;
+        s.push_str(&format!("self rpm={} err={}\n", rpm, if rpm { 0 } else { GetLastError() }));
+        let h = OpenProcess(PROCESS_QUERY_LIMITED | PROCESS_VM_READ, 0, std::process::id());
+        if !h.is_null() {
+            let mut c = 0usize;
+            SetLastError(0);
+            let r2 = ReadProcessMemory(h, peb as *const u8, b.as_mut_ptr(), 8, &mut c) != 0;
+            s.push_str(&format!("self(handle) rpm={} err={}\n", r2, if r2 { 0 } else { GetLastError() }));
+            CloseHandle(h);
+        }
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, std::process::id());
+        s.push_str(&format!("self snap_mod={}\n", snap != INVALID_HANDLE_VALUE));
+        if snap != INVALID_HANDLE_VALUE { CloseHandle(snap); }
+    }
+    write_log("selftest.txt", &s);
 }
 
 pub fn probe(pid: u32) {
     let mut s = String::new();
     s.push_str(&format!("=== venice probe pid={} t={} ===\n", pid, stamp()));
-    s.push_str(&format!("admin={} selfIL={} gameIL={} bit={}\n",
+    s.push_str(&format!("admin={} selfIL={} gameIL={} bit={} alive={}\n",
                         is_admin(), il_name(il_of_pid(std::process::id())), il_name(il_of_pid(pid)),
-                        std::mem::size_of::<usize>() * 8));
-    const C: [(DWORD, &str); 8] = [
-        (PROCESS_ALL_ACCESS, "ALL_ACCESS"),
-        (PROCESS_QUERY_LIMITED, "QUERY_LIMITED"),
-        (PROCESS_QUERY_INFORMATION, "QUERY_INFO"),
-        (PROCESS_VM_READ, "VM_READ"),
-        (PROCESS_VM_READ | PROCESS_QUERY_LIMITED, "VMR|QL"),
-        (PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_LIMITED, "VM_RW|QL"),
-        (PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, "VM_RW|QI"),
-        (PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED, "VM_RW|QI|QL"),
-    ];
+                        std::mem::size_of::<usize>() * 8, alive(pid)));
     unsafe {
-        for (r, n) in C {
-            SetLastError(0);
-            let h = OpenProcess(r, 0, pid);
-            if h.is_null() { s.push_str(&format!("{:<12} open FAIL err={}\n", n, GetLastError())); continue; }
+        SetLastError(0);
+        let h = OpenProcess(PROCESS_QUERY_LIMITED | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, 0, pid);
+        if h.is_null() {
+            s.push_str(&format!("open FAIL err={}\n", GetLastError()));
+        } else {
             let peb = nt_peb(h);
             let mut b = [0u8; 8]; let mut got = 0usize;
+            SetLastError(0);
             let rpm = peb != 0 && ReadProcessMemory(h, peb as *const u8, b.as_mut_ptr(), 8, &mut got) != 0;
-            let mut w = 0usize;
-            let wpm = rpm && WriteProcessMemory(h, peb as *mut u8, b.as_ptr(), 8, &mut w) != 0;
+            let rerr = if rpm { 0 } else { GetLastError() };
+            let mut nb = [0u8; 8]; let mut ngot = 0usize;
+            let nst = NtReadVirtualMemory(h, peb as *mut c_void, nb.as_mut_ptr() as *mut c_void, 8, &mut ngot);
             let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
             let vq = VirtualQueryEx(h, peb as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0;
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-            let snap_ok = snap != INVALID_HANDLE_VALUE;
-            if snap_ok { CloseHandle(snap); }
-            let mut need: DWORD = 0;
-            let psapi = EnumProcessModulesEx(h, std::ptr::null_mut(), 0, &mut need, LIST_MODULES_ALL) != 0;
-            s.push_str(&format!("{:<12} open OK  peb={:X} rpm={} wpm={} vq={} snap={} psapi={}\n",
-                                n, peb, rpm, wpm, vq, snap_ok, psapi));
+            let sok = snap != INVALID_HANDLE_VALUE;
+            if sok { CloseHandle(snap); }
+            s.push_str(&format!("peb={:X} rpm={} err={} nt={:X} vq={} state={:X} protect={:X} snap={}\n",
+                                peb, rpm, rerr, nst, vq, mbi.State, mbi.Protect, sok));
             CloseHandle(h);
         }
     }
     write_log("probe.txt", &s);
 }
 
+pub fn probe2(pid: u32) {
+    let mut s = String::new();
+    s.push_str(&format!("=== probe2 pid={} t={} admin={} bit={} ===\n", pid, stamp(), is_admin(), std::mem::size_of::<usize>() * 8));
+    s.push_str(&format!("gameIL={} selfIL={} alive={}\n", il_name(il_of_pid(pid)), il_name(il_of_pid(std::process::id())), alive(pid)));
+    unsafe {
+        let hp = OpenProcess(PROCESS_QUERY_LIMITED, 0, pid);
+        if !hp.is_null() {
+            let mut c: DWORD = 0;
+            GetExitCodeProcess(hp, &mut c);
+            let mut wow: BOOL = 0;
+            IsWow64Process(hp, &mut wow);
+            s.push_str(&format!("exitcode={} (259=STILL_ACTIVE) wow64={}\n", c, wow));
+            CloseHandle(hp);
+        } else {
+            s.push_str(&format!("query open FAIL err={}\n", GetLastError()));
+        }
+        SetLastError(0);
+        let h = OpenProcess(PROCESS_QUERY_LIMITED | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, 0, pid);
+        if h.is_null() {
+            s.push_str(&format!("open FAIL err={} (5=ACCESS_DENIED)\n", GetLastError()));
+        } else {
+            s.push_str(&format!("open OK open_err={} granted={:X} (10=VM_READ 20=VM_WRITE 8=VM_OP 1000=QL)\n", GetLastError(), granted_access(h)));
+            let peb = nt_peb(h);
+            let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            let vq = VirtualQueryEx(h, peb as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0;
+            s.push_str(&format!("peb={:X} vq={} state={:X}(2000=COMMIT) protect={:X} type={:X} region={:X}\n",
+                peb, vq, mbi.State, mbi.Protect, mbi.Type, mbi.RegionSize));
+            let mut b = [0u8; 8];
+            let mut got = 0usize;
+            SetLastError(0);
+            let rpm = ReadProcessMemory(h, peb as *const u8, b.as_mut_ptr(), 8, &mut got) != 0;
+            s.push_str(&format!("rpm={} err={}\n", rpm, if rpm { 0 } else { GetLastError() }));
+            let mut nb = [0u8; 8];
+            let mut ngot = 0usize;
+            let nst = NtReadVirtualMemory(h, peb as *mut c_void, nb.as_mut_ptr() as *mut c_void, 8, &mut ngot);
+            s.push_str(&format!("nt_read st={:X} n={}\n", nst, ngot));
+            let mut w = 0usize;
+            SetLastError(0);
+            let wpm = WriteProcessMemory(h, peb as *mut u8, b.as_ptr(), 8, &mut w) != 0;
+            s.push_str(&format!("wpm={} err={}\n", wpm, if wpm { 0 } else { GetLastError() }));
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+            let sok = snap != INVALID_HANDLE_VALUE;
+            s.push_str(&format!("snap_mod={} err={}\n", sok, if sok { 0 } else { GetLastError() }));
+            if sok { CloseHandle(snap); }
+            let mut need: DWORD = 0;
+            s.push_str(&format!("psapi={}\n", EnumProcessModulesEx(h, std::ptr::null_mut(), 0, &mut need, LIST_MODULES_ALL) != 0));
+            CloseHandle(h);
+        }
+        let h2 = OpenProcess(PROCESS_QUERY_LIMITED, 0, pid);
+        if !h2.is_null() {
+            let mut addr: u64 = 0x10000;
+            let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            let mut nb = [0u8; 512];
+            let mut n = 0u32;
+            while addr < 0x0000_7FFF_FFFF_0000 && n < 5 {
+                if VirtualQueryEx(h2, addr as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0 { break; }
+                let size = mbi.RegionSize as u64;
+                if mbi.State == MEM_COMMIT && mbi.Type == MEM_IMAGE {
+                    let l = GetMappedFileNameA(h2, mbi.BaseAddress, nb.as_mut_ptr(), nb.len() as DWORD);
+                    s.push_str(&format!("img {:016X} {}\n", mbi.BaseAddress as u64, if l > 0 { cstr(&nb[..l as usize]) } else { "?".to_string() }));
+                    n += 1;
+                }
+                addr += if size == 0 { 0x1000 } else { size };
+            }
+            CloseHandle(h2);
+        }
+        let hj = hijack_handle(pid);
+        s.push_str(&format!("hijack={}\n", hj.is_some()));
+        if let Some((hh, hw)) = hj {
+            let p2 = nt_peb(hh);
+            let mut bb = [0u8; 8];
+            s.push_str(&format!("hijack read={} writable={} peb={:X}\n", read_h(hh, p2, &mut bb), hw, p2));
+            CloseHandle(hh);
+        }
+    }
+    write_log("probe2.txt", &s);
+}
+
 pub fn full_dump(h: HANDLE, pid: u32) {
     let mut s = String::new();
-    s.push_str(&format!("=== venice full dump pid={} t={} ===\n", pid, stamp()));
+    s.push_str(&format!("=== venice full dump pid={} t={} rpm_fails={} rpm_err={} ===\n",
+        pid, stamp(), RPM_FAILS.load(Ordering::Relaxed), RPM_ERR.load(Ordering::Relaxed)));
     s.push_str(&format!("admin={} bit={} selfIL={}\n", is_admin(),
                         std::mem::size_of::<usize>() * 8, il_name(il_of_pid(std::process::id()))));
     let th = mods_th32(pid);
@@ -560,6 +860,30 @@ pub fn full_dump(h: HANDLE, pid: u32) {
     write_log("dump_done.txt", &format!("ok pid={} t={}\n", pid, stamp()));
 }
 
+fn find_module(h: HANDLE, pid: u32, cands: &[String]) -> Option<(String, u64, String)> {
+    let th = mods_th32(pid);
+    let ps = mods_psapi(h);
+    let pb = mods_peb(h);
+    for c in cands.iter() {
+        if let Some((_, b)) = th.iter().find(|(n, _)| n.eq_ignore_ascii_case(c)) {
+            if mz(h, *b) { return Some((c.clone(), *b, "toolhelp".to_string())); }
+        }
+        if let Some((_, b)) = ps.iter().find(|(n, _)| n.eq_ignore_ascii_case(c)) {
+            if mz(h, *b) { return Some((c.clone(), *b, "psapi".to_string())); }
+        }
+        if let Some((_, b)) = pb.iter().find(|(n, _)| n.eq_ignore_ascii_case(c)) {
+            if mz(h, *b) { return Some((c.clone(), *b, "peb".to_string())); }
+        }
+    }
+    for c in cands.iter() {
+        if let Some(b) = mod_base_gmf(h, c) { return Some((c.clone(), b, "gmf".to_string())); }
+    }
+    for c in cands.iter() {
+        if let Some(b) = mod_base_brute(h, c) { return Some((c.clone(), b, "brute".to_string())); }
+    }
+    None
+}
+
 pub fn attach5(exe: &str, modules: &str, force_base: u64) -> Result<Mem, String> {
     let cands: Vec<String> = modules.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     if cands.is_empty() { return Err("module= prazan u ini".to_string()); }
@@ -569,27 +893,36 @@ pub fn attach5(exe: &str, modules: &str, force_base: u64) -> Result<Mem, String>
     let self_il = il_of_pid(std::process::id());
 
     let mut log = String::new();
-    log.push_str(&format!("=== venice attach5 t={} ===\n", stamp()));
-    log.push_str(&format!("admin={} debugpriv={} bitness={} IL={}\n", admin, dbg, std::mem::size_of::<usize>() * 8, il_name(self_il)));
+    log.push_str(&format!("=== venice attach t={} ===\n", stamp()));
+    log.push_str(&format!("admin={} debugpriv={} bitness={} IL={} rpm_fails={} rpm_err={}\n",
+        admin, dbg, std::mem::size_of::<usize>() * 8, il_name(self_il),
+        RPM_FAILS.load(Ordering::Relaxed), RPM_ERR.load(Ordering::Relaxed)));
+    write_log("attach_log.txt", &log);
+    self_test();
 
-    let mut pids = all_pids(exe);
-    if pids.is_empty() { pids = all_pids_contains(exe); }
-    log.push_str(&format!("pids({}) = {:?}\n", exe, pids));
-    if pids.is_empty() { write_log("attach_log.txt", &log); return Err(format!("nema procesa {}", exe)); }
+    let mut pids: Vec<u32> = Vec::new();
+    for p in all_pids(exe) { if !pids.contains(&p) { pids.push(p); } }
+    for p in all_pids_contains(exe) { if !pids.contains(&p) { pids.push(p); } }
+    for p in pids_by_path(exe) { if !pids.contains(&p) { pids.push(p); } }
+    let mut dead: Vec<u32> = Vec::new();
+    for p in pids.iter() { if !alive(*p) { dead.push(*p); } }
+    pids.retain(|p| alive(*p));
+
+    log.push_str(&format!("pids({}) = {:?} dead={:?}\n", exe, pids, dead));
+    log.push_str(&format!("rust-procesi: {:?}\n", list_rust()));
+    write_log("attach_log.txt", &log);
+    if pids.is_empty() { return Err(format!("nema zivog procesa {}", exe)); }
 
     let mut diag = String::new();
 
     for pid in pids.iter() {
-        let pil = il_of_pid(*pid);
-        log.push_str(&format!("-- pid {} IL={}\n", pid, il_name(pil)));
-
+        log.push_str(&format!("-- pid {} IL={}\n", pid, il_name(il_of_pid(*pid))));
         let mut first = true;
-        for round in 0..4u32 {
+        for round in 0..3u32 {
             let (h, rights, writable) = match open_best(*pid) {
                 Some(x) => x,
                 None => { diag.push_str(&format!("pid{}:OpenProcess err={} ", pid, unsafe { GetLastError() })); break; }
             };
-
             if first {
                 first = false;
                 let mut img = [0u8; 512];
@@ -597,10 +930,13 @@ pub fn attach5(exe: &str, modules: &str, force_base: u64) -> Result<Mem, String>
                 let imgs = if unsafe { QueryFullProcessImageNameA(h, 0, img.as_mut_ptr(), &mut ilen) } != 0 {
                     String::from_utf8_lossy(&img[..ilen as usize]).to_string()
                 } else { "?".to_string() };
+                let mut wow: BOOL = 0;
+                unsafe { IsWow64Process(h, &mut wow); }
                 diag.push_str(&format!("pid{}[{}]({}) ", pid, rights, imgs));
-                log.push_str(&format!("pid{} rights={} writable={} img={}\n", pid, rights, writable, imgs));
+                log.push_str(&format!("pid{} rights={} writable={} wow64={} img={}\n", pid, rights, writable, wow, imgs));
                 write_log("attach_log.txt", &log);
                 full_dump(h, *pid);
+                probe2(*pid);
             }
 
             if force_base != 0 && mz(h, force_base) {
@@ -608,52 +944,28 @@ pub fn attach5(exe: &str, modules: &str, force_base: u64) -> Result<Mem, String>
                 write_log("attach_log.txt", &log);
                 return Ok(Mem { handle: h, pid: *pid, base: force_base, size: 0, writable,
                                 found_via: "force_base".to_string(), base_name: cands[0].clone(),
-                                elevated: admin, cache: RefCell::new(HashMap::new()) });
+                                elevated: admin, read_ok: true, cache: RefCell::new(HashMap::new()) });
             }
 
-            let th = mods_th32(*pid);
-            let ps = mods_psapi(h);
-            let pb = mods_peb(h);
-            let mut got: Option<(String, u64, u64, String)> = None;
-
-            'outer: for c in cands.iter() {
-                let hit = |v: &Vec<(String, u64)>| -> Option<u64> {
-                    v.iter().find(|(n, _)| n.eq_ignore_ascii_case(c)).map(|(_, b)| *b)
-                };
-                if let Some(b) = hit(&th) { if mz(h, b) { got = Some((c.clone(), b, 0, "toolhelp".to_string())); break 'outer; } }
-                if let Some(b) = hit(&ps) { if mz(h, b) { got = Some((c.clone(), b, 0, "psapi".to_string())); break 'outer; } }
-                if let Some(b) = hit(&pb) { if mz(h, b) { got = Some((c.clone(), b, 0, "peb".to_string())); break 'outer; } }
+            if let Some((name, base, how)) = find_module(h, *pid, &cands) {
+                let mut t = [0u8; 4];
+                let rok = read_h(h, base, &mut t);
+                log.push_str(&format!("OK pid={} module={} base={:X} via={} rights={} read={} rpm_fails={}\n",
+                    pid, name, base, how, rights, rok, RPM_FAILS.load(Ordering::Relaxed)));
+                write_log("attach_log.txt", &log);
+                return Ok(Mem { handle: h, pid: *pid, base, size: 0, writable,
+                                found_via: how, base_name: name, elevated: admin,
+                                read_ok: rok, cache: RefCell::new(HashMap::new()) });
             }
 
-            if got.is_none() && round < 2 {
-                for c in cands.iter() {
-                    if let Some(b) = mod_base_gmf(h, c) { if mz(h, b) { got = Some((c.clone(), b, 0, "mapped".to_string())); break; } }
-                    if let Some(b) = mod_base_brute(h, c) { if mz(h, b) { got = Some((c.clone(), b, 0, "brute".to_string())); break; } }
-                }
+            if round == 0 {
+                let th = mods_th32(*pid);
+                let ps = mods_psapi(h);
+                let pb = mods_peb(h);
+                diag.push_str(&format!("th32={} psapi={} peb={} pebaddr={:X} ", th.len(), ps.len(), pb.len(), nt_peb(h)));
             }
-
-            match got {
-                Some((name, base, size, how)) => {
-                    log.push_str(&format!("OK pid={} module={} base={:X} via={} rights={}\n", pid, name, base, how, rights));
-                    write_log("attach_log.txt", &log);
-                    return Ok(Mem { handle: h, pid: *pid, base, size, writable,
-                                    found_via: how, base_name: name, elevated: admin,
-                                    cache: RefCell::new(HashMap::new()) });
-                }
-                None => {
-                    if round == 0 {
-                        diag.push_str(&format!("th32={} psapi={} peb={} pebaddr={:X} ",
-                                               th.len(), ps.len(), pb.len(), nt_peb(h)));
-                        probe(*pid);
-                        dump_peb(h);
-                        let mut bl = String::new();
-                        bases_scan(h, &mut bl);
-                        write_log("bases.txt", &bl);
-                    }
-                    unsafe { CloseHandle(h); }
-                    unsafe { Sleep(120); }
-                }
-            }
+            unsafe { CloseHandle(h); }
+            unsafe { Sleep(120); }
         }
     }
 
@@ -667,12 +979,7 @@ impl Mem {
     pub fn ok(&self) -> bool { !self.handle.is_null() && self.pid != 0 }
     pub fn clear_cache(&self) { self.cache.borrow_mut().clear(); }
 
-    pub fn read(&self, a: u64, b: &mut [u8]) -> bool {
-        if a == 0 { return false; }
-        let mut n = 0usize;
-        let ok = unsafe { ReadProcessMemory(self.handle, a as *const u8, b.as_mut_ptr(), b.len(), &mut n) };
-        ok != 0 && n == b.len()
-    }
+    pub fn read(&self, a: u64, b: &mut [u8]) -> bool { read_h(self.handle, a, b) }
     pub fn read_u8(&self, a: u64) -> u8 { let mut b = [0u8; 1]; if self.read(a, &mut b) { b[0] } else { 0 } }
     pub fn read_u32(&self, a: u64) -> u32 { let mut b = [0u8; 4]; if self.read(a, &mut b) { u32::from_le_bytes(b) } else { 0 } }
     pub fn read_i32(&self, a: u64) -> i32 { self.read_u32(a) as i32 }
@@ -682,9 +989,7 @@ impl Mem {
 
     pub fn write_u32(&self, a: u64, v: u32) -> bool {
         if !self.writable { return false; }
-        let b = v.to_le_bytes();
-        let mut n = 0usize;
-        unsafe { WriteProcessMemory(self.handle, a as *mut u8, b.as_ptr(), 4, &mut n) != 0 }
+        write_h(self.handle, a, &v.to_le_bytes())
     }
     pub fn write_f32(&self, a: u64, v: f32) -> bool { self.write_u32(a, v.to_bits()) }
 
@@ -707,4 +1012,3 @@ impl Mem {
         String::from_utf16_lossy(&u)
     }
 }
-
