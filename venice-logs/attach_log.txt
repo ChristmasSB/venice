@@ -1,0 +1,5 @@
+=== venice attach5 t=1792290452 ===
+admin=true debugpriv=true bitness=64 IL=HIGH(ADMIN)
+pids(RustClient.exe) = [19248]
+-- pid 19248 IL=MEDIUM
+pid19248 rights=ql+vmrw writable=true img=E:\SteamLibrary\steamapps\common\Rust\RustClient.exe

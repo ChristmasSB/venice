@@ -1,0 +1,1 @@
+start t=1792290198 exe_dir=C:\Users\petar\AppData\Local\Temp\venice_rust

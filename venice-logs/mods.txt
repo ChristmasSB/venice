@@ -1,0 +1,5 @@
+=== venice full dump pid=19248 t=1792290452 ===
+admin=true bit=64 selfIL=HIGH(ADMIN)
+--- toolhelp modules (0) ---
+--- psapi modules (0) ---
+--- peb modules (0) ---
