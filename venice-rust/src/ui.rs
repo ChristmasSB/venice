@@ -13,6 +13,7 @@ pub struct Ui {
     pub color: usize,
     pub status: Vec<String>,
     pub hot: i32,
+    pub dirty: bool,
 }
 
 pub const COLORS: [(u8, u8, u8); 6] = [
@@ -22,7 +23,7 @@ pub const COLORS: [(u8, u8, u8); 6] = [
 
 impl Ui {
     pub fn new() -> Ui {
-        Ui { open: true, mx: 0, my: 0, click: false, edit: None, buf: String::new(), color: 0, status: Vec::new(), hot: -1 }
+        Ui { open: true, mx: 0, my: 0, click: false, edit: None, buf: String::new(), color: 0, status: Vec::new(), hot: -1, dirty: false }
     }
 
     fn row(&mut self, c: &mut Canvas, cfg: &mut Cfg, y: &mut i32, label: &str, key: &str, kind: u8, step: u64) {
@@ -45,6 +46,7 @@ impl Ui {
             c.text(x + w - 60, *y + 5, if on { "ON" } else { "OFF" }, r, g, b, 255, 1);
             if hot && self.click {
                 cfg.set(key, if on { "0" } else { "1" });
+                self.dirty = true;
             }
         } else if kind == 1 {
             c.text(x + w - 130, *y + 5, "-", 255, 255, 255, 255, 1);
@@ -56,6 +58,7 @@ impl Ui {
                 } else {
                     cfg.set(key, &format!("{:X}", vnum.saturating_sub(step)));
                 }
+                self.dirty = true;
             }
         } else {
             let shown = if editing { format!("{}_", self.buf) } else { format!("{:X}", vnum) };
@@ -81,7 +84,7 @@ impl Ui {
         let rows = 30;
         c.rect(x, y, w, rows * 20 + 60, 12, 12, 18, 235);
         c.frame(x, y, w, rows * 20 + 60, 0, 180, 255, 255);
-        c.text(x + 8, y + 6, "VENICE RUST v3.1", 0, 220, 255, 255, 1);
+        c.text(x + 8, y + 6, "VENICE RUST v3.2", 0, 220, 255, 255, 1);
         y += 22;
 
         self.row(c, cfg, &mut y, "ESP", "esp_enabled", 0, 1);
@@ -142,6 +145,7 @@ impl Ui {
         if vk == crate::win::VK_RETURN {
             if let Some(k) = self.edit.clone() {
                 cfg.set(&k, &self.buf.clone());
+                self.dirty = true;
             }
             self.edit = None;
         }

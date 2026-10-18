@@ -89,12 +89,12 @@ impl Canvas {
         for ch in s.bytes() {
             let gi = if ch >= 32 && ch < 128 { (ch - 32) as usize } else { 0 };
             let gl = FONT[gi];
-            for col in 0..5 {
+            for col in 0..5usize {
                 let bits = gl[col];
-                for row in 0..7 {
-                    if bits & (1 << row) != 0 {
+                for row in 0..7usize {
+                    if bits & (1u8 << row) != 0 {
                         for dy in 0..sc { for dx in 0..sc {
-                            self.blend(cx + col * sc + dx, y + row * sc + dy, r, g, b, a);
+                            self.blend(cx + col as i32 * sc + dx, y + row as i32 * sc + dy, r, g, b, a);
                         } }
                     }
                 }
@@ -106,3 +106,4 @@ impl Canvas {
     pub fn tw(&self, s: &str, sc: i32) -> i32 { s.len() as i32 * 6 * sc.max(1) }
     pub fn th(&self, sc: i32) -> i32 { 7 * sc.max(1) }
 }
+

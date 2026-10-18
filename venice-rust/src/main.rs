@@ -3,6 +3,63 @@ mod win; mod mem; mod cfg; mod draw; mod game; mod ui;
 
 use win::*;
 use std::ffi::c_void;
+use std::path::{Path, PathBuf};
+
+const DEFAULT_INI: &str = r#"; VENICE RUST v3.2 - rust.ini
+; F1 menu, F2 esp, F3 norecoil, F4 nospread, F5 reload, END exit
+; sve vrijednosti smiju biti hex (0x... ili golo)
+
+[proc]
+exe=RustClient.exe
+module=GameAssembly.dll
+
+[keys]
+key_menu=F1
+key_esp=F2
+key_recoil=F3
+key_spread=F4
+key_reload=F5
+key_exit=END
+
+[esp]
+esp_enabled=1
+esp_box=1
+esp_name=1
+esp_health=1
+esp_distance=1
+esp_max_distance=300
+esp_text_scale=1
+
+[handle]
+handle_mode=u64
+
+[offsets]
+localplayer_static=0x11645DB8
+static_fields=0xB8
+localplayer_entity=0x40
+hv_in_wrapper=0x0
+bn_static=0x115F0A18
+bn_list_off=0x20
+list_items_off=0x10
+list_count_off=0x18
+array_data=0x20
+player_name=0x6F0
+player_uid=0x718
+player_health=0x2B4
+player_inventory=0x510
+pos_chain=0x348,0x10,0x38
+head_h=1.65
+camera_static=0x0
+camera_instance=0x30
+w2c_off=0x2E0
+recoil_props=0x3A8
+item_heldentity=0x88
+itemcontainer_itemlist=0x60
+recoil_fields=0x18,0x1C,0x20,0x24
+spread_fields=0x30,0x34,0x38,0x3C
+norecoil=1
+nospread=0
+"#;
 
 fn vk_of(name: &str) -> i32 {
     let n = name.trim().to_ascii_uppercase();
@@ -33,27 +90,55 @@ impl Keys {
     }
 }
 
-unsafe extern "system" fn wndproc(h: HWND, m: UINT, w: WPARAM, l: LPARAM) -> LRESULT {
+extern "system" fn wndproc(h: HWND, m: UINT, w: WPARAM, l: LPARAM) -> LRESULT {
     match m {
-        0x0002 => { PostQuitMessage(0); 0 }
+        0x0002 => { unsafe { PostQuitMessage(0) }; 0 }
         0x0014 => 1,
-        _ => DefWindowProcA(h, m, w, l),
+        _ => unsafe { DefWindowProcA(h, m, w, l) },
     }
 }
 
-fn find_ini() -> String {
-    if let Ok(p) = std::env::current_exe() {
-        if let Some(d) = p.parent() {
-            let f = d.join("rust.ini");
-            if f.exists() { return f.to_string_lossy().to_string(); }
-        }
-    }
-    "rust.ini".to_string()
+fn ini_paths() -> (PathBuf, PathBuf) {
+    let primary = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.join("rust.ini")))
+        .unwrap_or_else(|| PathBuf::from("rust.ini"));
+    let mirror = std::env::var("LOCALAPPDATA")
+        .map(|l| PathBuf::from(l).join("venice_rust").join("rust.ini"))
+        .unwrap_or_else(|_| PathBuf::from("rust_mirror.ini"));
+    (primary, mirror)
+}
+
+fn dup_cfg(c: &cfg::Cfg) -> cfg::Cfg {
+    let mut n = cfg::Cfg::load("__venice_none__");
+    for (k, v) in c.p.iter() { n.set(k, v); }
+    n
+}
+
+fn read_cfg(primary: &Path, mirror: &Path, fallback: &cfg::Cfg) -> cfg::Cfg {
+    if primary.exists() { return cfg::Cfg::load(&primary.to_string_lossy()); }
+    if mirror.exists() { return cfg::Cfg::load(&mirror.to_string_lossy()); }
+    dup_cfg(fallback)
+}
+
+fn save_cfg(c: &cfg::Cfg, primary: &Path, mirror: &Path) {
+    if let Some(d) = mirror.parent() { let _ = std::fs::create_dir_all(d); }
+    c.save(&mirror.to_string_lossy());
+    if primary.exists() { c.save(&primary.to_string_lossy()); }
 }
 
 fn main() {
-    let ini = find_ini();
-    let mut cfg = cfg::Cfg::load(&ini);
+    let (ini, mirror) = ini_paths();
+    let seed = cfg::Cfg::load("__venice_none__");
+    if ini.exists() {
+        if let Some(d) = mirror.parent() { let _ = std::fs::create_dir_all(d); }
+        let _ = std::fs::copy(&ini, &mirror);
+    }
+    let mut cfg = read_cfg(&ini, &mirror, &seed);
+    if cfg.p.is_empty() {
+        if let Some(d) = mirror.parent() { let _ = std::fs::create_dir_all(d); }
+        let _ = std::fs::write(&mirror, DEFAULT_INI);
+        cfg = cfg::Cfg::load(&mirror.to_string_lossy());
+    }
 
     let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
     if sw < 100 || sh < 100 { return; }
@@ -97,6 +182,7 @@ fn main() {
     let mut game: Option<game::Game> = None;
     let mut status: Vec<String> = Vec::new();
     let mut last_attach = std::time::Instant::now();
+    let dummy = game::Game::new(cfg::Cfg::load("__venice_none__"), 0, (sw, sh));
 
     let k_menu = vk_of(&cfg.s("key_menu", "F1"));
     let k_esp = vk_of(&cfg.s("key_esp", "F2"));
@@ -106,6 +192,8 @@ fn main() {
     let k_exit = vk_of(&cfg.s("key_exit", "END"));
 
     loop {
+        let mut dirty = false;
+
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         while unsafe { PeekMessageA(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
             unsafe { TranslateMessage(&msg); DispatchMessageA(&msg); }
@@ -113,10 +201,10 @@ fn main() {
 
         if keys.pressed(k_exit) { break; }
         if keys.pressed(k_menu) { ui.open = !ui.open; }
-        if keys.pressed(k_esp) { let v = !cfg.b("esp_enabled", true); cfg.set("esp_enabled", if v { "1" } else { "0" }); }
-        if keys.pressed(k_recoil) { let v = !cfg.b("norecoil", true); cfg.set("norecoil", if v { "1" } else { "0" }); }
-        if keys.pressed(k_spread) { let v = !cfg.b("nospread", false); cfg.set("nospread", if v { "1" } else { "0" }); }
-        if keys.pressed(k_reload) { cfg = cfg::Cfg::load(&ini); status.push("ini reload".into()); }
+        if keys.pressed(k_esp) { let v = !cfg.b("esp_enabled", true); cfg.set("esp_enabled", if v { "1" } else { "0" }); dirty = true; }
+        if keys.pressed(k_recoil) { let v = !cfg.b("norecoil", true); cfg.set("norecoil", if v { "1" } else { "0" }); dirty = true; }
+        if keys.pressed(k_spread) { let v = !cfg.b("nospread", false); cfg.set("nospread", if v { "1" } else { "0" }); dirty = true; }
+        if keys.pressed(k_reload) { cfg = read_cfg(&ini, &mirror, &cfg); status.push("ini reload".into()); }
 
         for vk in 0x08..0x60 { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
         for vk in 0x60..0x6A { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
@@ -128,15 +216,14 @@ fn main() {
         let lbtn = (unsafe { GetAsyncKeyState(VK_LBUTTON) } as u16 & 0x8000) != 0;
         let prev_click = ui.click;
         ui.click = lbtn && !prev_click;
-        let was_click = ui.click;
 
         if memr.is_none() && last_attach.elapsed().as_millis() > 1000 {
             last_attach = std::time::Instant::now();
-            match mem::Mem::attach(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
+            match mem::attach3(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
                 Ok(m) => {
                     status.clear();
                     status.push(format!("OK pid={} base={:X}", m.pid, m.base));
-                    game = Some(game::Game::new(cfg::Cfg::load(&ini), m.base, (sw, sh)));
+                    game = Some(game::Game::new(dup_cfg(&cfg), m.base, (sw, sh)));
                     memr = Some(m);
                 }
                 Err(e) => {
@@ -148,7 +235,7 @@ fn main() {
         }
 
         if let (Some(m), Some(g)) = (memr.as_ref(), game.as_mut()) {
-            g.cfg = cfg::Cfg::load(&ini);
+            g.cfg = dup_cfg(&cfg);
             g.refresh(m);
             if cfg.b("norecoil", true) { g.norecoil(m); }
             if cfg.b("nospread", false) { g.nospread(m); }
@@ -196,8 +283,13 @@ fn main() {
 
         status.truncate(10);
         ui.status = status.clone();
-        ui.draw(&mut canvas, &mut cfg, game.as_ref().unwrap_or(&game::Game::new(cfg::Cfg::load(&ini), 0, (sw, sh))));
-        let _ = was_click;
+        ui.draw(&mut canvas, &mut cfg, game.as_ref().unwrap_or(&dummy));
+
+        if dirty || ui.dirty {
+            save_cfg(&cfg, &ini, &mirror);
+            dirty = false;
+            ui.dirty = false;
+        }
 
         unsafe {
             let dst = std::slice::from_raw_parts_mut(bits, (sw * sh) as usize);
@@ -211,3 +303,6 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
+
+
+

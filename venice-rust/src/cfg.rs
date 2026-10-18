@@ -6,7 +6,7 @@ pub fn num(s: &str) -> u64 {
     if t.is_empty() { return 0; }
     let (neg, t) = match t.strip_prefix('-') {
         Some(r) => (true, r.to_string()),
-        None => (false, t),
+        None => (false, t.clone()),
     };
     let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         u64::from_str_radix(h, 16).unwrap_or(0)
@@ -84,3 +84,4 @@ impl Cfg {
         let _ = std::fs::write(path, out);
     }
 }
+

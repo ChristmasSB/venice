@@ -185,3 +185,20 @@ extern "system" {
     pub fn SelectObject(dc: HDC, obj: HGDIOBJ) -> HGDIOBJ;
     pub fn DeleteObject(obj: HGDIOBJ) -> BOOL;
 }
+
+pub const LIST_MODULES_ALL: DWORD = 0x03;
+
+#[repr(C)] #[derive(Clone, Copy, Default)]
+pub struct MODULEINFO { pub lpBaseOfDll: *mut c_void, pub SizeOfImage: DWORD, pub EntryPoint: *mut c_void }
+
+#[link(name = "psapi")]
+extern "system" {
+    pub fn EnumProcessModulesEx(h: HANDLE, mods: *mut HMODULE, cb: DWORD, needed: *mut DWORD, filter: DWORD) -> BOOL;
+    pub fn GetModuleBaseNameA(h: HANDLE, m: HMODULE, buf: *mut u8, size: DWORD) -> DWORD;
+    pub fn GetModuleInformation(h: HANDLE, m: HMODULE, mi: *mut MODULEINFO, cb: DWORD) -> BOOL;
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    pub fn NtQueryInformationProcess(h: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
+}
