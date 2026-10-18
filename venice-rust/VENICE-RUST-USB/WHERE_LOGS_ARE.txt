@@ -1,0 +1,10 @@
+t=1792352670
+exe_dir=C:\Users\petar\venice-rust\VENICE-RUST-USB
+admin=false
+--- log folderi ---
+C:\Users\petar\venice-logs
+C:\Users\petar\venice-rust\VENICE-RUST-USB\venice-logs
+C:\Users\petar\venice-rust\VENICE-RUST-USB
+C:\Users\petar\AppData\Local\Temp\venice_rust
+C:\Users\petar\AppData\Local\Temp\venice_rust\venice-logs
+C:\Users\petar\AppData\Local\venice_rust\logs
