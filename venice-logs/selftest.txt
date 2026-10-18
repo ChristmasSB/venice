@@ -1,0 +1,4 @@
+=== selftest t=1792350878 admin=true bit=64 ===
+self rpm=true err=0
+self(handle) rpm=true err=0
+self snap_mod=true

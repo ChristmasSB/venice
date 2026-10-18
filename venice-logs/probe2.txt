@@ -1,0 +1,16 @@
+=== probe2 pid=29440 t=1792350879 admin=true bit=64 ===
+gameIL=MEDIUM selfIL=HIGH(ADMIN) alive=true
+exitcode=259 (259=STILL_ACTIVE) wow64=0
+open OK open_err=0
+peb=C237147000 vq=true state=1000(2000=COMMIT) protect=4 type=20000 region=5000
+rpm=false err=5
+nt_read st=C0000022 n=0
+wpm=false err=5
+snap_mod=false err=5
+psapi=false
+img 00000240C29F0000 \Device\HarddiskVolume3\Windows\System32\shell32.dll
+img 00000240C29F1000 \Device\HarddiskVolume3\Windows\System32\shell32.dll
+img 00000240C2FC4000 \Device\HarddiskVolume3\Windows\System32\shell32.dll
+img 00000240C3107000 \Device\HarddiskVolume3\Windows\System32\shell32.dll
+img 00000240C3108000 \Device\HarddiskVolume3\Windows\System32\shell32.dll
+hijack=false

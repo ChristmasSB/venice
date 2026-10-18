@@ -1,4 +1,4 @@
-peb=5A0720F000
-raw RPM FAIL
-ldr@18=0 ldr@0C=0 imgbase@10=0 imgbase@08=0
+peb=C237147000
+raw read FAIL
+ldr@18=0 ldr@0C=0
 walk64=0 walk32=0

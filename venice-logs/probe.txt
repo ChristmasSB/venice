@@ -1,10 +1,3 @@
-=== venice probe pid=19248 t=1792290459 ===
-admin=true selfIL=HIGH(ADMIN) gameIL=MEDIUM bit=64
-ALL_ACCESS   open OK  peb=5A0720F000 rpm=false wpm=false vq=true snap=false psapi=false
-QUERY_LIMITED open OK  peb=5A0720F000 rpm=false wpm=false vq=true snap=false psapi=false
-QUERY_INFO   open OK  peb=5A0720F000 rpm=false wpm=false vq=true snap=false psapi=false
-VM_READ      open OK  peb=0 rpm=false wpm=false vq=false snap=false psapi=false
-VMR|QL       open OK  peb=5A0720F000 rpm=false wpm=false vq=true snap=false psapi=false
-VM_RW|QL     open OK  peb=5A0720F000 rpm=false wpm=false vq=true snap=false psapi=false
-VM_RW|QI     open OK  peb=5A0720F000 rpm=false wpm=false vq=true snap=false psapi=false
-VM_RW|QI|QL  open OK  peb=5A0720F000 rpm=false wpm=false vq=true snap=false psapi=false
+=== venice probe pid=29440 t=1792350879 ===
+admin=true selfIL=HIGH(ADMIN) gameIL=MEDIUM bit=64 alive=true
+peb=C237147000 rpm=false err=5 nt=C0000022 vq=true state=1000 protect=4 snap=false
