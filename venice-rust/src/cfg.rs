@@ -74,7 +74,7 @@ impl Cfg {
         let mut ks: Vec<&String> = self.p.keys().collect();
         ks.sort();
         let mut out = String::new();
-        out.push_str("; VENICE RUST v3.1 - auto-save\n");
+        out.push_str("; VENICE RUST v3.3 - auto-save\n");
         for k in ks {
             out.push_str(k);
             out.push('=');
@@ -84,4 +84,3 @@ impl Cfg {
         let _ = std::fs::write(path, out);
     }
 }
-

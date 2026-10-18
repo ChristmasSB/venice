@@ -1,4 +1,4 @@
-#![allow(non_snake_case, non_camel_case_types, dead_code, unused)]
+#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals, dead_code, unused)]
 use std::ffi::c_void;
 
 pub type HWND = *mut c_void;
@@ -8,6 +8,7 @@ pub type HBITMAP = *mut c_void;
 pub type HGDIOBJ = *mut c_void;
 pub type HMODULE = *mut c_void;
 pub type HINSTANCE = *mut c_void;
+pub type HKEY = *mut c_void;
 pub type LPARAM = isize;
 pub type WPARAM = usize;
 pub type LRESULT = isize;
@@ -17,6 +18,8 @@ pub type UINT = u32;
 pub type LONG = i32;
 pub type WORD = u16;
 pub type ATOM = u16;
+pub type SIZE_T = usize;
+pub type NTSTATUS = i32;
 
 pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 pub const HWND_TOPMOST: HWND = -1isize as HWND;
@@ -25,6 +28,7 @@ pub const PROCESS_ALL_ACCESS: DWORD = 0x001F0FFF;
 pub const PROCESS_VM_READ: DWORD = 0x0010;
 pub const PROCESS_VM_WRITE: DWORD = 0x0020;
 pub const PROCESS_VM_OPERATION: DWORD = 0x0008;
+pub const PROCESS_QUERY_INFORMATION: DWORD = 0x0400;
 pub const PROCESS_QUERY_LIMITED: DWORD = 0x1000;
 
 pub const TH32CS_SNAPPROCESS: DWORD = 0x00000002;
@@ -42,8 +46,7 @@ pub const AC_SRC_OVER: u8 = 0x00;
 pub const AC_SRC_ALPHA: u8 = 0x01;
 
 pub const SW_SHOW: i32 = 5;
-pub const SWP_NOSIZE: UINT = 0x0001;
-pub const SWP_NOMOVE: UINT = 0x0002;
+pub const SW_SHOWNORMAL: i32 = 1;
 pub const SWP_NOACTIVATE: UINT = 0x0010;
 
 pub const PM_REMOVE: UINT = 0x0001;
@@ -53,10 +56,22 @@ pub const DIB_RGB_COLORS: UINT = 0;
 pub const BI_RGB: DWORD = 0;
 
 pub const VK_LBUTTON: i32 = 0x01;
-pub const VK_RBUTTON: i32 = 0x02;
 pub const VK_RETURN: i32 = 0x0D;
 pub const VK_ESCAPE: i32 = 0x1B;
 pub const VK_BACK: i32 = 0x08;
+
+pub const TOKEN_ADJUST_PRIVILEGES: DWORD = 0x0020;
+pub const TOKEN_QUERY: DWORD = 0x0008;
+pub const SE_PRIVILEGE_ENABLED: DWORD = 0x00000002;
+pub const TOKEN_ELEVATION: u32 = 20;
+
+pub const SEE_MASK_NOCLOSEPROCESS: DWORD = 0x00000040;
+
+pub const MEM_COMMIT: DWORD = 0x1000;
+pub const MEM_IMAGE: DWORD = 0x1000000;
+pub const MEMORY_MAPPED_FILENAME_INFORMATION: u32 = 2;
+
+pub const LIST_MODULES_ALL: DWORD = 0x03;
 
 #[repr(C)] #[derive(Clone, Copy, Default)]
 pub struct POINT { pub x: LONG, pub y: LONG }
@@ -141,6 +156,55 @@ pub struct MODULEENTRY32 {
     pub szExePath: [u8; 260],
 }
 
+#[repr(C)] #[derive(Clone, Copy, Default)]
+pub struct MODULEINFO { pub lpBaseOfDll: *mut c_void, pub SizeOfImage: DWORD, pub EntryPoint: *mut c_void }
+
+#[repr(C)] #[derive(Clone, Copy, Default)]
+pub struct LUID { pub LowPart: u32, pub HighPart: i32 }
+
+#[repr(C)] #[derive(Clone, Copy, Default)]
+pub struct LUID_AND_ATTRIBUTES { pub Luid: LUID, pub Attributes: DWORD }
+
+#[repr(C)] #[derive(Clone, Copy, Default)]
+pub struct TOKEN_PRIVILEGES { pub PrivilegeCount: DWORD, pub Privileges: [LUID_AND_ATTRIBUTES; 1] }
+
+#[repr(C)] #[derive(Clone, Copy, Default)]
+pub struct TOKEN_ELEVATION_STRUCT { pub TokenIsElevated: DWORD }
+
+#[repr(C)]
+pub struct SHELLEXECUTEINFOA {
+    pub cbSize: DWORD,
+    pub fMask: u32,
+    pub hwnd: HWND,
+    pub lpVerb: *const u8,
+    pub lpFile: *const u8,
+    pub lpParameters: *const u8,
+    pub lpDirectory: *const u8,
+    pub nShow: i32,
+    pub hInstApp: HINSTANCE,
+    pub lpIDList: *mut c_void,
+    pub lpClass: *const u8,
+    pub hkeyClass: HKEY,
+    pub dwHotKey: DWORD,
+    pub hIcon: HANDLE,
+    pub hProcess: HANDLE,
+}
+
+#[repr(C)]
+pub struct MEMORY_BASIC_INFORMATION {
+    pub BaseAddress: *mut c_void,
+    pub AllocationBase: *mut c_void,
+    pub AllocationProtect: DWORD,
+    pub PartitionId: WORD,
+    pub RegionSize: SIZE_T,
+    pub State: DWORD,
+    pub Protect: DWORD,
+    pub Type: DWORD,
+}
+
+#[repr(C)]
+pub struct UNICODE_STRING { pub Length: u16, pub MaximumLength: u16, pub Buffer: *mut u16 }
+
 #[link(name = "kernel32")]
 extern "system" {
     pub fn OpenProcess(a: DWORD, b: BOOL, c: DWORD) -> HANDLE;
@@ -155,14 +219,33 @@ extern "system" {
     pub fn Process32Next(h: HANDLE, pe: *mut PROCESSENTRY32) -> BOOL;
     pub fn Module32First(h: HANDLE, me: *mut MODULEENTRY32) -> BOOL;
     pub fn Module32Next(h: HANDLE, me: *mut MODULEENTRY32) -> BOOL;
+    pub fn GetCurrentProcess() -> HANDLE;
+    pub fn GetModuleFileNameA(h: HMODULE, buf: *mut u8, n: DWORD) -> DWORD;
+    pub fn GetCommandLineA() -> *const u8;
+    pub fn VirtualQueryEx(h: HANDLE, addr: *const c_void, mbi: *mut MEMORY_BASIC_INFORMATION, len: SIZE_T) -> SIZE_T;
+    pub fn QueryFullProcessImageNameA(h: HANDLE, flags: DWORD, buf: *mut u8, n: *mut DWORD) -> BOOL;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    pub fn OpenProcessToken(p: HANDLE, acc: DWORD, out: *mut HANDLE) -> BOOL;
+    pub fn LookupPrivilegeValueA(sys: *const u8, name: *const u8, luid: *mut LUID) -> BOOL;
+    pub fn AdjustTokenPrivileges(tok: HANDLE, dis: BOOL, np: *mut TOKEN_PRIVILEGES, len: DWORD,
+                                 prev: *mut TOKEN_PRIVILEGES, ret: *mut DWORD) -> BOOL;
+    pub fn GetTokenInformation(tok: HANDLE, class: u32, info: *mut c_void, len: DWORD, ret: *mut DWORD) -> BOOL;
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    pub fn ShellExecuteExA(sei: *mut SHELLEXECUTEINFOA) -> BOOL;
 }
 
 #[link(name = "user32")]
 extern "system" {
     pub fn RegisterClassA(wc: *const WNDCLASSA) -> ATOM;
-    pub fn CreateWindowExA(ex: DWORD, class: *const u8, name: *const u8, style: DWORD, x: i32, y: i32, w: i32, h: i32, parent: HWND, menu: HANDLE, inst: HINSTANCE, param: *mut c_void) -> HWND;
+    pub fn CreateWindowExA(ex: DWORD, class: *const u8, name: *const u8, style: DWORD, x: i32, y: i32,
+                           w: i32, h: i32, parent: HWND, menu: HANDLE, inst: HINSTANCE, param: *mut c_void) -> HWND;
     pub fn DefWindowProcA(h: HWND, m: UINT, w: WPARAM, l: LPARAM) -> LRESULT;
-    pub fn DestroyWindow(h: HWND) -> BOOL;
     pub fn PeekMessageA(m: *mut MSG, h: HWND, min: UINT, max: UINT, remove: UINT) -> BOOL;
     pub fn TranslateMessage(m: *const MSG) -> BOOL;
     pub fn DispatchMessageA(m: *const MSG) -> LRESULT;
@@ -172,7 +255,8 @@ extern "system" {
     pub fn GetSystemMetrics(idx: i32) -> i32;
     pub fn ShowWindow(h: HWND, cmd: i32) -> BOOL;
     pub fn SetWindowPos(h: HWND, after: HWND, x: i32, y: i32, cx: i32, cy: i32, flags: UINT) -> BOOL;
-    pub fn UpdateLayeredWindow(h: HWND, dst: HDC, dstPt: *const POINT, size: *const SIZE, src: HDC, srcPt: *const POINT, color: u32, blend: *const BLENDFUNCTION, flags: DWORD) -> BOOL;
+    pub fn UpdateLayeredWindow(h: HWND, dst: HDC, dstPt: *const POINT, size: *const SIZE, src: HDC,
+                               srcPt: *const POINT, color: u32, blend: *const BLENDFUNCTION, flags: DWORD) -> BOOL;
     pub fn GetDC(h: HWND) -> HDC;
     pub fn ReleaseDC(h: HWND, dc: HDC) -> i32;
 }
@@ -180,16 +264,10 @@ extern "system" {
 #[link(name = "gdi32")]
 extern "system" {
     pub fn CreateCompatibleDC(dc: HDC) -> HDC;
-    pub fn DeleteDC(dc: HDC) -> BOOL;
-    pub fn CreateDIBSection(dc: HDC, bi: *const BITMAPINFO, usage: UINT, bits: *mut *mut c_void, sec: HANDLE, off: DWORD) -> HBITMAP;
+    pub fn CreateDIBSection(dc: HDC, bi: *const BITMAPINFO, usage: UINT, bits: *mut *mut c_void,
+                            sec: HANDLE, off: DWORD) -> HBITMAP;
     pub fn SelectObject(dc: HDC, obj: HGDIOBJ) -> HGDIOBJ;
-    pub fn DeleteObject(obj: HGDIOBJ) -> BOOL;
 }
-
-pub const LIST_MODULES_ALL: DWORD = 0x03;
-
-#[repr(C)] #[derive(Clone, Copy, Default)]
-pub struct MODULEINFO { pub lpBaseOfDll: *mut c_void, pub SizeOfImage: DWORD, pub EntryPoint: *mut c_void }
 
 #[link(name = "psapi")]
 extern "system" {
@@ -200,5 +278,7 @@ extern "system" {
 
 #[link(name = "ntdll")]
 extern "system" {
-    pub fn NtQueryInformationProcess(h: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
+    pub fn NtQueryInformationProcess(h: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> NTSTATUS;
+    pub fn NtQueryVirtualMemory(h: HANDLE, addr: *mut c_void, class: u32, info: *mut c_void,
+                                len: SIZE_T, ret: *mut SIZE_T) -> NTSTATUS;
 }

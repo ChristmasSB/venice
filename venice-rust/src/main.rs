@@ -5,61 +5,7 @@ use win::*;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_INI: &str = r#"; VENICE RUST v3.2 - rust.ini
-; F1 menu, F2 esp, F3 norecoil, F4 nospread, F5 reload, END exit
-; sve vrijednosti smiju biti hex (0x... ili golo)
-
-[proc]
-exe=RustClient.exe
-module=GameAssembly.dll
-
-[keys]
-key_menu=F1
-key_esp=F2
-key_recoil=F3
-key_spread=F4
-key_reload=F5
-key_exit=END
-
-[esp]
-esp_enabled=1
-esp_box=1
-esp_name=1
-esp_health=1
-esp_distance=1
-esp_max_distance=300
-esp_text_scale=1
-
-[handle]
-handle_mode=u64
-
-[offsets]
-localplayer_static=0x11645DB8
-static_fields=0xB8
-localplayer_entity=0x40
-hv_in_wrapper=0x0
-bn_static=0x115F0A18
-bn_list_off=0x20
-list_items_off=0x10
-list_count_off=0x18
-array_data=0x20
-player_name=0x6F0
-player_uid=0x718
-player_health=0x2B4
-player_inventory=0x510
-pos_chain=0x348,0x10,0x38
-head_h=1.65
-camera_static=0x0
-camera_instance=0x30
-w2c_off=0x2E0
-recoil_props=0x3A8
-item_heldentity=0x88
-itemcontainer_itemlist=0x60
-recoil_fields=0x18,0x1C,0x20,0x24
-spread_fields=0x30,0x34,0x38,0x3C
-norecoil=1
-nospread=0
-"#;
+const DEFAULT_INI: &str = include_str!("../rust.ini");
 
 fn vk_of(name: &str) -> i32 {
     let n = name.trim().to_ascii_uppercase();
@@ -90,13 +36,29 @@ impl Keys {
     }
 }
 
-extern "system" fn wndproc(h: HWND, m: UINT, w: WPARAM, l: LPARAM) -> LRESULT {
+unsafe extern "system" fn wndproc(h: HWND, m: UINT, w: WPARAM, l: LPARAM) -> LRESULT {
     match m {
-        0x0002 => { unsafe { PostQuitMessage(0) }; 0 }
+        0x0002 => { PostQuitMessage(0); 0 }
         0x0014 => 1,
-        _ => unsafe { DefWindowProcA(h, m, w, l) },
+        _ => DefWindowProcA(h, m, w, l),
     }
 }
+
+fn cmdline() -> String {
+    unsafe {
+        let p = GetCommandLineA();
+        if p.is_null() { return String::new(); }
+        let mut v = Vec::new();
+        for i in 0..4096isize {
+            let b = *p.offset(i);
+            if b == 0 { break; }
+            v.push(b);
+        }
+        String::from_utf8_lossy(&v).to_ascii_lowercase()
+    }
+}
+
+fn has_arg(a: &str) -> bool { cmdline().contains(&a.to_ascii_lowercase()) }
 
 fn ini_paths() -> (PathBuf, PathBuf) {
     let primary = std::env::current_exe().ok()
@@ -114,10 +76,16 @@ fn dup_cfg(c: &cfg::Cfg) -> cfg::Cfg {
     n
 }
 
-fn read_cfg(primary: &Path, mirror: &Path, fallback: &cfg::Cfg) -> cfg::Cfg {
+fn read_cfg(primary: &Path, mirror: &Path) -> cfg::Cfg {
     if primary.exists() { return cfg::Cfg::load(&primary.to_string_lossy()); }
     if mirror.exists() { return cfg::Cfg::load(&mirror.to_string_lossy()); }
-    dup_cfg(fallback)
+    let mut c = cfg::Cfg::load("__none__");
+    for line in DEFAULT_INI.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('[') { continue; }
+        if let Some(i) = line.find('=') { c.set(&line[..i].trim(), line[i + 1..].trim()); }
+    }
+    c
 }
 
 fn save_cfg(c: &cfg::Cfg, primary: &Path, mirror: &Path) {
@@ -127,15 +95,17 @@ fn save_cfg(c: &cfg::Cfg, primary: &Path, mirror: &Path) {
 }
 
 fn main() {
-    let (ini, mirror) = ini_paths();
-    let seed = cfg::Cfg::load("__venice_none__");
-    if ini.exists() {
-        if let Some(d) = mirror.parent() { let _ = std::fs::create_dir_all(d); }
-        let _ = std::fs::copy(&ini, &mirror);
+    let cleanup = has_arg("--cleanup");
+    let noadmin = has_arg("--noadmin");
+
+    if !mem::is_admin() && !noadmin {
+        if mem::relaunch_elevated() { return; }
     }
-    let mut cfg = read_cfg(&ini, &mirror, &seed);
+    let _dbg = mem::enable_debug_priv();
+
+    let (ini, mirror) = ini_paths();
+    let mut cfg = read_cfg(&ini, &mirror);
     if cfg.p.is_empty() {
-        if let Some(d) = mirror.parent() { let _ = std::fs::create_dir_all(d); }
         let _ = std::fs::write(&mirror, DEFAULT_INI);
         cfg = cfg::Cfg::load(&mirror.to_string_lossy());
     }
@@ -182,7 +152,10 @@ fn main() {
     let mut game: Option<game::Game> = None;
     let mut status: Vec<String> = Vec::new();
     let mut last_attach = std::time::Instant::now();
-    let dummy = game::Game::new(cfg::Cfg::load("__venice_none__"), 0, (sw, sh));
+    let mut fps_t = std::time::Instant::now();
+    let mut frames = 0u32;
+    let mut fps = 0f32;
+    let dummy = game::Game::new(cfg::Cfg::load("__none__"), 0, (sw, sh));
 
     let k_menu = vk_of(&cfg.s("key_menu", "F1"));
     let k_esp = vk_of(&cfg.s("key_esp", "F2"));
@@ -193,6 +166,12 @@ fn main() {
 
     loop {
         let mut dirty = false;
+        frames += 1;
+        if fps_t.elapsed().as_millis() > 500 {
+            fps = frames as f32 * 1000.0 / fps_t.elapsed().as_millis() as f32;
+            frames = 0;
+            fps_t = std::time::Instant::now();
+        }
 
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         while unsafe { PeekMessageA(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
@@ -204,7 +183,7 @@ fn main() {
         if keys.pressed(k_esp) { let v = !cfg.b("esp_enabled", true); cfg.set("esp_enabled", if v { "1" } else { "0" }); dirty = true; }
         if keys.pressed(k_recoil) { let v = !cfg.b("norecoil", true); cfg.set("norecoil", if v { "1" } else { "0" }); dirty = true; }
         if keys.pressed(k_spread) { let v = !cfg.b("nospread", false); cfg.set("nospread", if v { "1" } else { "0" }); dirty = true; }
-        if keys.pressed(k_reload) { cfg = read_cfg(&ini, &mirror, &cfg); status.push("ini reload".into()); }
+        if keys.pressed(k_reload) { cfg = read_cfg(&ini, &mirror); status.push("ini reload".into()); }
 
         for vk in 0x08..0x60 { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
         for vk in 0x60..0x6A { if keys.pressed(vk) { ui.key_char(vk, &mut cfg); } }
@@ -217,19 +196,19 @@ fn main() {
         let prev_click = ui.click;
         ui.click = lbtn && !prev_click;
 
-        if memr.is_none() && last_attach.elapsed().as_millis() > 1000 {
+        if memr.is_none() && last_attach.elapsed().as_millis() > 1200 {
             last_attach = std::time::Instant::now();
-            match mem::attach3(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
+            match mem::attach4(&cfg.s("exe", "RustClient.exe"), &cfg.s("module", "GameAssembly.dll")) {
                 Ok(m) => {
                     status.clear();
-                    status.push(format!("OK pid={} base={:X}", m.pid, m.base));
+                    status.push(format!("OK pid={} base={:X} via={}", m.pid, m.base, m.found_via));
                     game = Some(game::Game::new(dup_cfg(&cfg), m.base, (sw, sh)));
                     memr = Some(m);
                 }
                 Err(e) => {
                     status.clear();
                     status.push(e);
-                    for r in mem::list_rust().iter().take(6) { status.push(r.clone()); }
+                    for r in mem::list_rust().iter().take(4) { status.push(r.clone()); }
                 }
             }
         }
@@ -239,6 +218,25 @@ fn main() {
             g.refresh(m);
             if cfg.b("norecoil", true) { g.norecoil(m); }
             if cfg.b("nospread", false) { g.nospread(m); }
+        }
+
+        if ui.want_scan {
+            ui.want_scan = false;
+            if let Some(g) = game.as_mut() { g.scan_budget = 3; g.cam_ptr = 0; }
+            status.push("scan cam...".into());
+        }
+        if ui.want_save {
+            ui.want_save = false;
+            if let Some(g) = game.as_ref() {
+                if g.cam_off != 0 {
+                    cfg.set("camera_via_player", &format!("0x{:X}", g.cam_off));
+                    cfg.set("camera_matrix_off", &format!("0x{:X}", g.cam_delta));
+                    dirty = true;
+                    status.push(format!("cam ofs sacuvan {:X}+{:X}", g.cam_off, g.cam_delta));
+                } else {
+                    status.push("cam nije nadjen".into());
+                }
+            }
         }
 
         canvas.clear();
@@ -281,9 +279,15 @@ fn main() {
             }
         }
 
-        status.truncate(10);
+        status.truncate(8);
         ui.status = status.clone();
         ui.draw(&mut canvas, &mut cfg, game.as_ref().unwrap_or(&dummy));
+
+        if let Some(g) = game.as_ref() {
+            let hud = format!("fps {:.0}  players {}  base {:X}  cam {}",
+                              fps, g.players.len(), g.base, if g.view_ok { "OK" } else { "--" });
+            canvas.text(12, 4, &hud, 0, 220, 255, 255, 1);
+        }
 
         if dirty || ui.dirty {
             save_cfg(&cfg, &ini, &mirror);
@@ -302,7 +306,10 @@ fn main() {
 
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
+
+    if cleanup {
+        let _ = std::fs::remove_file(mem::exe_dir().join("attach_log.txt"));
+        let _ = std::fs::remove_file(mem::exe_dir().join("mods.txt"));
+    }
 }
-
-
 

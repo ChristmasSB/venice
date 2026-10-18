@@ -106,4 +106,3 @@ impl Canvas {
     pub fn tw(&self, s: &str, sc: i32) -> i32 { s.len() as i32 * 6 * sc.max(1) }
     pub fn th(&self, sc: i32) -> i32 { 7 * sc.max(1) }
 }
-
